@@ -42,6 +42,50 @@ export async function registerRoutes(
     }
   });
 
+  app.patch(api.customers.update.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const input = api.customers.update.input.parse(req.body);
+      const customer = await storage.updateCustomer(id, input);
+      res.json(customer);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.delete(api.customers.delete.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      await storage.deleteCustomer(id);
+      res.status(204).send();
+    } catch (err: any) {
+      res.status(400).json({ message: err.message });
+    }
+  });
+
+  app.post(api.customers.repay.path, async (req, res) => {
+    try {
+      const input = api.customers.repay.input.parse(req.body);
+      const payment = await storage.createPayment({
+        customerId: input.customerId,
+        amount: input.amount.toString(),
+        note: input.note || "Manual repayment",
+        billId: null
+      });
+      res.status(201).json(payment);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
   // === Products ===
   app.get(api.products.list.path, async (req, res) => {
     const search = req.query.search as string | undefined;
@@ -110,8 +154,8 @@ async function seedData() {
     await storage.createProduct({ name: "Masala Tea Powder", price: "120.00", sku: "TEA01", isActive: true });
   }
 
-  const customers = await storage.getCustomers();
-  if (customers.length === 0) {
+  const customersList = await storage.getCustomers();
+  if (customersList.length === 0) {
     console.log("Seeding customers...");
     await storage.createCustomer({ name: "Rajesh Kumar", phone: "9876543210" });
     await storage.createCustomer({ name: "Priya Sharma", phone: "9876543211" });

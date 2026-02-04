@@ -14,6 +14,9 @@ export interface IStorage {
   getCustomerStats(id: number): Promise<{ totalPurchased: number; totalPaid: number; balance: number }>;
   getCustomerHistory(id: number): Promise<{ type: 'bill' | 'payment', date: string, amount: number, id: number }[]>;
   createCustomer(customer: Omit<Customer, "id" | "createdAt">): Promise<Customer>;
+  updateCustomer(id: number, customer: Partial<Omit<Customer, "id" | "createdAt">>): Promise<Customer>;
+  deleteCustomer(id: number): Promise<void>;
+  createPayment(payment: Omit<Payment, "id" | "date">): Promise<Payment>;
   
   // Products
   getProducts(search?: string): Promise<Product[]>;
@@ -31,25 +34,15 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   async getCustomers(search?: string): Promise<(Customer & { balance: number })[]> {
-    // This requires aggregation. For simplicity/speed in MVP, we might just fetch and compute, 
-    // or better, write a raw query. Let's use a raw query for balance.
-    // Balance = Sum(Bills) - Sum(Payments)
-    
     const whereClause = search ? sql`name ILIKE ${`%${search}%`} OR phone ILIKE ${`%${search}%`}` : undefined;
-    
-    // We can join tables but Drizzle query builder is easier if we keep it simple.
-    // Let's just return customers for now and maybe compute balance for "Pending Dues" page separately?
-    // Or simpler:
     const allCustomers = await db.select().from(customers).where(whereClause);
     
-    // Calculate balances (N+1 problem but fine for small POS)
-    // Optimization: GroupBy query is better.
     const results = await Promise.all(allCustomers.map(async (c) => {
       const stats = await this.getCustomerStats(c.id);
       return { ...c, balance: stats.balance };
     }));
     
-    return results.sort((a, b) => b.balance - a.balance); // Show high dues first
+    return results.sort((a, b) => b.balance - a.balance); 
   }
 
   async getCustomer(id: number): Promise<Customer | undefined> {
@@ -98,11 +91,34 @@ export class DatabaseStorage implements IStorage {
     return customer;
   }
 
+  async updateCustomer(id: number, data: Partial<Omit<Customer, "id" | "createdAt">>): Promise<Customer> {
+    const [customer] = await db.update(customers).set(data).where(eq(customers.id, id)).returning();
+    return customer;
+  }
+
+  async deleteCustomer(id: number): Promise<void> {
+    // Check if customer has bills
+    const [bill] = await db.select().from(bills).where(eq(bills.customerId, id)).limit(1);
+    if (bill) {
+      throw new Error("Cannot delete customer with existing bills");
+    }
+    await db.delete(customers).where(eq(customers.id, id));
+  }
+
+  async createPayment(data: Omit<Payment, "id" | "date">): Promise<Payment> {
+    const [payment] = await db.insert(payments).values({
+      ...data,
+      amount: data.amount.toString(),
+      date: new Date()
+    }).returning();
+    return payment;
+  }
+
   async getProducts(search?: string): Promise<Product[]> {
     if (search) {
       return db.select().from(products).where(sql`name ILIKE ${`%${search}%`}`);
     }
-    return db.select().from(products).limit(50); // Recent items
+    return db.select().from(products).limit(50); 
   }
 
   async createProduct(data: Omit<Product, "id">): Promise<Product> {
@@ -141,7 +157,6 @@ export class DatabaseStorage implements IStorage {
 
   async createBill(data: CreateBillRequest): Promise<Bill> {
     return await db.transaction(async (tx) => {
-      // 1. Handle Customer
       let customerId = data.customerId;
       if (!customerId && data.customerName) {
         const [newCustomer] = await tx.insert(customers).values({
@@ -151,10 +166,8 @@ export class DatabaseStorage implements IStorage {
         customerId = newCustomer.id;
       }
 
-      // 2. Calculate Total
       const totalAmount = data.items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
 
-      // 3. Create Bill
       const [bill] = await tx.insert(bills).values({
         customerId,
         totalAmount: totalAmount.toFixed(2),
@@ -162,16 +175,9 @@ export class DatabaseStorage implements IStorage {
         status: 'completed'
       }).returning();
 
-      // 4. Create Bill Items and optionally Products
       for (const item of data.items) {
         let productId = item.productId;
-        
-        // Auto-create product if it doesn't exist (Searchable item memory)
         if (!productId) {
-           // check if exists by name to avoid dupes?
-           // For MVP, if no ID provided, just treat as ad-hoc or create new?
-           // The prompt says "Searchable item memory".
-           // Let's check if name exists, if so use it, else create.
            const [existing] = await tx.select().from(products).where(eq(products.name, item.name));
            if (existing) {
              productId = existing.id;
@@ -194,7 +200,6 @@ export class DatabaseStorage implements IStorage {
         });
       }
 
-      // 5. Record Payment
       if (data.paidAmount > 0 && customerId) {
         await tx.insert(payments).values({
           customerId,

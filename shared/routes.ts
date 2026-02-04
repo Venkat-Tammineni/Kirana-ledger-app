@@ -30,6 +30,14 @@ const createBillSchema = z.object({
   date: z.string().optional(),
 });
 
+// New schema for repayment
+const createRepaymentSchema = z.object({
+  customerId: z.number(),
+  amount: z.number().min(0.01, "Amount must be greater than zero"),
+  note: z.string().optional(),
+  date: z.string().optional(),
+});
+
 export const api = {
   customers: {
     list: {
@@ -64,6 +72,35 @@ export const api = {
         400: errorSchemas.validation,
       },
     },
+    update: {
+      method: 'PATCH' as const,
+      path: '/api/customers/:id',
+      input: insertCustomerSchema.partial(),
+      responses: {
+        200: z.custom<typeof customers.$inferSelect>(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
+    delete: {
+      method: 'DELETE' as const,
+      path: '/api/customers/:id',
+      responses: {
+        204: z.void(),
+        400: z.object({ message: z.string() }),
+        404: errorSchemas.notFound,
+      },
+    },
+    repay: {
+      method: 'POST' as const,
+      path: '/api/customers/:id/repay',
+      input: createRepaymentSchema,
+      responses: {
+        201: z.custom<typeof payments.$inferSelect>(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    }
   },
   products: {
     list: {
@@ -147,3 +184,4 @@ export function buildUrl(path: string, params?: Record<string, string | number>)
 }
 
 export type CreateBillInput = z.infer<typeof createBillSchema>;
+export type CreateRepaymentInput = z.infer<typeof createRepaymentSchema>;
