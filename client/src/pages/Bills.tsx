@@ -1,9 +1,9 @@
 import { useBills } from "@/hooks/use-pos";
-import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link } from "wouter";
-import { ChevronRight, FileText } from "lucide-react";
+import { ChevronRight, FileText, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatCurrencyINR, formatDateTime } from "@/lib/format";
 
 export default function Bills() {
   const { data: bills, isLoading } = useBills();
@@ -34,13 +34,13 @@ export default function Bills() {
                 <tr key={bill.id} className="hover:bg-muted/30 transition-colors group">
                   <td className="px-6 py-4 font-mono font-medium">#{bill.id}</td>
                   <td className="px-6 py-4 text-muted-foreground">
-                    {bill.date ? format(new Date(bill.date), "dd MMM, hh:mm a") : '-'}
+                    {bill.date ? formatDateTime(bill.date, "dd MMM, hh:mm a") : '-'}
                   </td>
                   <td className="px-6 py-4 font-medium">
                     {bill.customerName || "Walk-in Customer"}
                   </td>
                   <td className="px-6 py-4 text-right font-mono font-bold">
-                    ₹{bill.totalAmount}
+                    {formatCurrencyINR(Number(bill.totalAmount || 0))}
                   </td>
                   <td className="px-6 py-4 text-right">
                     <span className={cn(
@@ -51,11 +51,28 @@ export default function Bills() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <Link href={`/bills/${bill.id}`}>
-                      <button className="text-muted-foreground hover:text-primary transition-colors">
-                        <ChevronRight className="w-5 h-5" />
-                      </button>
-                    </Link>
+                    <div className="flex items-center justify-end gap-2">
+                      {bill.status === "completed" && (
+                        <Link href={`/bills/${bill.id}/edit`}>
+                          <button
+                            type="button"
+                            className="text-muted-foreground hover:text-primary transition-colors"
+                            title="Edit bill"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                        </Link>
+                      )}
+                      <Link href={`/bills/${bill.id}`}>
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-primary transition-colors"
+                          title="View bill"
+                        >
+                          <ChevronRight className="w-5 h-5" />
+                        </button>
+                      </Link>
+                    </div>
                   </td>
                 </tr>
               ))}

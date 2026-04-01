@@ -1,15 +1,17 @@
-import { useState, useMemo } from "react";
-import { useProducts, useCreateBill, useCustomers } from "@/hooks/use-pos";
-import { Search, Plus, Trash2, IndianRupee, Save, CreditCard, UserPlus, CalendarIcon, ShoppingBag } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useRoute } from "wouter";
+import { ArrowLeft, CalendarIcon, CreditCard, IndianRupee, Plus, Save, Search, ShoppingBag, Trash2 } from "lucide-react";
+import { useBill, useProducts, useUpdateBill } from "@/hooks/use-pos";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { formatCurrencyINR, formatDateTime } from "@/lib/format";
 import { format } from "date-fns";
-import { formatCurrencyINR } from "@/lib/format";
 import {
   deriveUnitPriceFromBase,
   getBaseUnit,
@@ -54,32 +56,125 @@ interface PendingProductSelection {
   unitConversion?: number | null;
 }
 
-export default function Pos() {
-  const { data: products } = useProducts();
-  const { data: customers } = useCustomers();
-  const { mutate: createBill, isPending: isSaving } = useCreateBill();
+function inferItemUnits(item: {
+  unit?: string | null;
+  baseUnit?: string | null;
+  quantity?: number | null;
+  baseQuantity?: number | null;
+}) {
+  const selectedUnit = (item.unit || item.baseUnit || "PCS") as UnitOption;
+  const baseUnit = (item.baseUnit || item.unit || "PCS") as UnitOption;
+  const ratio =
+    selectedUnit !== baseUnit &&
+    Number(item.quantity || 0) > 0 &&
+    Number(item.baseQuantity || 0) > Number(item.quantity || 0)
+      ? Math.round(Number(item.baseQuantity || 0) / Number(item.quantity || 1))
+      : null;
+
+  return {
+    primaryUnit: selectedUnit,
+    secondaryUnit: selectedUnit !== baseUnit && ratio && ratio > 1 ? baseUnit : null,
+    unitConversion: selectedUnit !== baseUnit && ratio && ratio > 1 ? ratio : null,
+  };
+}
+
+function getItemUnitConfig(
+  item: {
+    productId?: number | null;
+    unit?: string | null;
+    baseUnit?: string | null;
+    quantity?: number | null;
+    baseQuantity?: number | null;
+  },
+  products?: Array<{
+    id: number;
+    primaryUnit?: string | null;
+    secondaryUnit?: string | null;
+    unitConversion?: number | null;
+  }>,
+) {
+  const matchedProduct = item.productId ? products?.find((product) => product.id === item.productId) : undefined;
+  if (matchedProduct) {
+    return {
+      primaryUnit: getPrimaryUnit(matchedProduct),
+      secondaryUnit: hasSecondaryUnit(matchedProduct) ? (matchedProduct.secondaryUnit as UnitOption) : null,
+      unitConversion: matchedProduct.unitConversion ?? null,
+    };
+  }
+
+  return inferItemUnits(item);
+}
+
+export default function BillEdit() {
+  const [, params] = useRoute("/bills/:id/edit");
+  const billId = Number(params?.id);
+  const [, setLocation] = useLocation();
+  const { data: bill, isLoading } = useBill(billId);
+  const { data: products, isLoading: isProductsLoading } = useProducts();
+  const { mutate: updateBill, isPending: isSaving } = useUpdateBill();
   const { toast } = useToast();
 
   const [cart, setCart] = useState<CartItem[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedCustomer, setSelectedCustomer] = useState<number | null>(null);
   const [extraCharges, setExtraCharges] = useState<ExtraChargeRow[]>([]);
   const [pendingProduct, setPendingProduct] = useState<PendingProductSelection | null>(null);
-  
-  // Custom item state
   const [isCustomItemOpen, setIsCustomItemOpen] = useState(false);
   const [customItem, setCustomItem] = useState({ name: "", price: "", quantity: "1", unit: "PCS" as UnitOption });
-
-  // Payment dialog state
-  const [isPaymentOpen, setIsPaymentOpen] = useState(false);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [paidAmount, setPaidAmount] = useState("");
   const [billDate, setBillDate] = useState<Date | undefined>(new Date());
+  const [editedBy, setEditedBy] = useState("");
+  const [initialized, setInitialized] = useState(false);
 
+  useEffect(() => {
+    if (isLoading || isProductsLoading || initialized) return;
+    if (!bill) {
+      setInitialized(true);
+      return;
+    }
+
+    setCart(
+      bill.items.map((item) => {
+        const unitConfig = getItemUnitConfig(item, products);
+        const selectedUnit = (item.unit || item.baseUnit || "PCS") as UnitOption;
+        const basePrice = normalizeUnitPriceToBase(Number(item.price || 0), unitConfig, selectedUnit);
+        const baseCostPrice = normalizeUnitPriceToBase(Number(item.costPrice || 0), unitConfig, selectedUnit);
+
+        return {
+          tempId: crypto.randomUUID(),
+          productId: item.productId ?? undefined,
+          name: item.name,
+          price: Number(item.price || 0),
+          basePrice,
+          costPrice: Number(item.costPrice || 0),
+          baseCostPrice,
+          quantity: Number(item.quantity || 1),
+          unit: selectedUnit,
+          primaryUnit: unitConfig.primaryUnit,
+          secondaryUnit: unitConfig.secondaryUnit,
+          unitConversion: unitConfig.unitConversion,
+        };
+      }),
+    );
+    setExtraCharges(
+      (bill.charges || []).map((charge) => ({
+        id: crypto.randomUUID(),
+        label: charge.label,
+        amount: String(Number(charge.amount || 0)),
+      })),
+    );
+    setPaidAmount(
+      String(Number(bill.billPaidAmount || 0) + Number(bill.oldBalancePaidAmount || 0)),
+    );
+    setBillDate(bill.date ? new Date(bill.date) : new Date());
+    setEditedBy(bill.lastEditedBy || "");
+    setInitialized(true);
+  }, [bill, initialized, isLoading, isProductsLoading, products]);
 
   const filteredProducts = useMemo(() => {
     if (!products || !searchTerm) return products || [];
     const lower = searchTerm.toLowerCase();
-    return products.filter(p => p.name.toLowerCase().includes(lower));
+    return products.filter((product) => product.name.toLowerCase().includes(lower));
   }, [products, searchTerm]);
 
   const openProductPriceDialog = (product: any) => {
@@ -104,7 +199,7 @@ export default function Pos() {
     });
   };
 
-  const addToCart = () => {
+  const addSelectedProductToCart = () => {
     if (!pendingProduct) return;
 
     const unitConfig = {
@@ -115,133 +210,135 @@ export default function Pos() {
     const nextPrice = Math.max(0, Number(pendingProduct.price || 0));
     const nextBasePrice = normalizeUnitPriceToBase(nextPrice, unitConfig, pendingProduct.unit);
 
-    setCart(prev => {
-      const existing = prev.find((item) =>
-        item.productId === pendingProduct.productId &&
-        item.unit === pendingProduct.unit &&
-        Math.abs(item.price - nextPrice) < 0.0001
+    setCart((prev) => {
+      const existing = prev.find(
+        (item) =>
+          item.productId === pendingProduct.productId &&
+          item.unit === pendingProduct.unit &&
+          Math.abs(item.price - nextPrice) < 0.0001,
       );
+
       if (existing) {
-        return prev.map(item => 
+        return prev.map((item) =>
           item.productId === pendingProduct.productId &&
           item.unit === pendingProduct.unit &&
           Math.abs(item.price - nextPrice) < 0.0001
-            ? { ...item, quantity: item.quantity + 1 } 
-            : item
+            ? { ...item, quantity: item.quantity + 1 }
+            : item,
         );
       }
-      return [...prev, {
-        tempId: crypto.randomUUID(),
-        productId: pendingProduct.productId,
-        name: pendingProduct.name,
-        price: nextPrice,
-        basePrice: nextBasePrice,
-        costPrice: deriveUnitPriceFromBase(pendingProduct.baseCostPrice, unitConfig, pendingProduct.unit),
-        baseCostPrice: pendingProduct.baseCostPrice,
-        quantity: 1,
-        unit: pendingProduct.unit,
-        primaryUnit: pendingProduct.primaryUnit,
-        secondaryUnit: pendingProduct.secondaryUnit ?? null,
-        unitConversion: pendingProduct.unitConversion ?? null,
-      }];
+
+      return [
+        ...prev,
+        {
+          tempId: crypto.randomUUID(),
+          productId: pendingProduct.productId,
+          name: pendingProduct.name,
+          price: nextPrice,
+          basePrice: nextBasePrice,
+          costPrice: deriveUnitPriceFromBase(pendingProduct.baseCostPrice, unitConfig, pendingProduct.unit),
+          baseCostPrice: pendingProduct.baseCostPrice,
+          quantity: 1,
+          unit: pendingProduct.unit,
+          primaryUnit: pendingProduct.primaryUnit,
+          secondaryUnit: pendingProduct.secondaryUnit ?? null,
+          unitConversion: pendingProduct.unitConversion ?? null,
+        },
+      ];
     });
+
     setPendingProduct(null);
     setSearchTerm("");
   };
 
   const addCustomItem = () => {
-    if (!customItem.name || !customItem.price) return;
-    setCart(prev => [...prev, {
-      tempId: crypto.randomUUID(),
-      name: customItem.name,
-      price: Number(customItem.price),
-      basePrice: Number(customItem.price),
-      costPrice: 0, // Default cost price to 0 for custom items
-      baseCostPrice: 0,
-      quantity: Number(customItem.quantity),
-      unit: customItem.unit,
-      primaryUnit: customItem.unit,
-      secondaryUnit: null,
-      unitConversion: null,
-    }]);
+    if (!customItem.name.trim() || !customItem.price) return;
+
+    setCart((prev) => [
+      ...prev,
+      {
+        tempId: crypto.randomUUID(),
+        name: customItem.name.trim(),
+        price: Number(customItem.price),
+        basePrice: Number(customItem.price),
+        costPrice: 0,
+        baseCostPrice: 0,
+        quantity: Number(customItem.quantity || 1),
+        unit: customItem.unit,
+        primaryUnit: customItem.unit,
+        secondaryUnit: null,
+        unitConversion: null,
+      },
+    ]);
+
     setCustomItem({ name: "", price: "", quantity: "1", unit: "PCS" });
     setIsCustomItemOpen(false);
   };
 
-  const updateQuantity = (tempId: string, delta: number) => {
-    setCart(prev => prev.map(item => {
-      if (item.tempId === tempId) {
-        const newQty = Math.max(1, item.quantity + delta);
-        return { ...item, quantity: newQty };
-      }
-      return item;
-    }));
+  const setQuantity = (tempId: string, quantity: number) => {
+    setCart((prev) =>
+      prev.map((item) =>
+        item.tempId === tempId ? { ...item, quantity: Math.max(1, quantity) } : item,
+      ),
+    );
   };
 
-  const setQuantity = (tempId: string, quantity: number) => {
-    setCart(prev => prev.map(item => {
-      if (item.tempId === tempId) {
-        const newQty = Math.max(1, quantity);
-        return { ...item, quantity: newQty };
-      }
-      return item;
-    }));
+  const updateQuantity = (tempId: string, delta: number) => {
+    setCart((prev) =>
+      prev.map((item) =>
+        item.tempId === tempId
+          ? { ...item, quantity: Math.max(1, item.quantity + delta) }
+          : item,
+      ),
+    );
   };
 
   const setSellingPrice = (tempId: string, price: number) => {
-    setCart(prev => prev.map(item => {
-      if (item.tempId === tempId) {
-        const nextPrice = Math.max(0, price);
-        return {
-          ...item,
-          price: nextPrice,
-          basePrice: normalizeUnitPriceToBase(nextPrice, {
-            primaryUnit: item.primaryUnit,
-            secondaryUnit: item.secondaryUnit,
-            unitConversion: item.unitConversion,
-          }, item.unit),
-        };
-      }
-      return item;
-    }));
+    setCart((prev) =>
+      prev.map((item) =>
+        item.tempId === tempId
+          ? {
+              ...item,
+              price: Math.max(0, price),
+              basePrice: normalizeUnitPriceToBase(Math.max(0, price), {
+                primaryUnit: item.primaryUnit,
+                secondaryUnit: item.secondaryUnit,
+                unitConversion: item.unitConversion,
+              }, item.unit),
+            }
+          : item,
+      ),
+    );
   };
 
   const setUnit = (tempId: string, unit: UnitOption) => {
-    setCart(prev => prev.map(item => {
-      if (item.tempId === tempId) {
+    setCart((prev) =>
+      prev.map((item) => {
+        if (item.tempId !== tempId) return item;
+
         const unitConfig = {
           primaryUnit: item.primaryUnit,
           secondaryUnit: item.secondaryUnit,
           unitConversion: item.unitConversion,
         };
+
         return {
           ...item,
           unit,
           price: deriveUnitPriceFromBase(item.basePrice, unitConfig, unit),
           costPrice: deriveUnitPriceFromBase(item.baseCostPrice, unitConfig, unit),
         };
-      }
-      return item;
-    }));
+      }),
+    );
+  };
+
+  const setItemName = (tempId: string, name: string) => {
+    setCart((prev) => prev.map((item) => (item.tempId === tempId ? { ...item, name } : item)));
   };
 
   const removeFromCart = (tempId: string) => {
-    setCart(prev => prev.filter(i => i.tempId !== tempId));
+    setCart((prev) => prev.filter((item) => item.tempId !== tempId));
   };
-
-  const cartTotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const activeCustomer = customers?.find(c => c.id === selectedCustomer);
-  const oldBalance = Math.max(0, Number(activeCustomer?.balance || 0));
-  const normalizedExtraCharges = extraCharges
-    .map((charge) => ({
-      ...charge,
-      label: charge.label.trim(),
-      amountNumber: Number(charge.amount || 0),
-    }))
-    .filter((charge) => charge.label && charge.amountNumber >= 0);
-  const extraChargesTotal = normalizedExtraCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
-  const billTotal = cartTotal + extraChargesTotal;
-  const grandTotal = billTotal + oldBalance;
 
   const addExtraChargeRow = () => {
     setExtraCharges((prev) => [...prev, { id: crypto.randomUUID(), label: "", amount: "" }]);
@@ -257,107 +354,144 @@ export default function Pos() {
     setExtraCharges((prev) => prev.filter((charge) => charge.id !== id));
   };
 
-  const handleCheckout = () => {
+  const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const normalizedExtraCharges = extraCharges
+    .map((charge) => ({
+      ...charge,
+      label: charge.label.trim(),
+      amountNumber: Number(charge.amount || 0),
+    }))
+    .filter((charge) => charge.label && charge.amountNumber >= 0);
+  const extraChargesTotal = normalizedExtraCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
+  const billTotal = cartTotal + extraChargesTotal;
+  const oldBalance = Math.max(0, Number(bill?.oldBalanceAmount || 0));
+  const grandTotal = billTotal + oldBalance;
+
+  const openReview = () => {
     if (cart.length === 0) {
-      toast({ title: "Empty Cart", description: "Add items before checkout", variant: "destructive" });
+      toast({ title: "Bill is empty", description: "Add at least one item before saving.", variant: "destructive" });
       return;
     }
-    setPaidAmount(grandTotal.toString());
-    setIsPaymentOpen(true);
+    setIsReviewOpen(true);
   };
 
-  const submitBill = () => {
+  const submitUpdate = () => {
+    if (!bill) return;
+
     const payment = Number(paidAmount);
-    if (isNaN(payment) || payment < 0) return;
-    const appliedPayment = Math.min(payment, grandTotal);
+    if (Number.isNaN(payment) || payment < 0) return;
 
-    createBill({
-      customerId: selectedCustomer || undefined,
-      items: cart.map(i => ({
-        productId: i.productId,
-        name: i.name,
-        quantity: i.quantity,
-        unit: i.unit,
-        baseQuantity: toBaseQuantity(i.quantity, {
-          primaryUnit: i.primaryUnit,
-          secondaryUnit: i.secondaryUnit,
-          unitConversion: i.unitConversion,
-        }, i.unit),
-        baseUnit: getBaseUnit({
-          primaryUnit: i.primaryUnit,
-          secondaryUnit: i.secondaryUnit,
-          unitConversion: i.unitConversion,
-        }),
-        price: i.price,
-        costPrice: i.costPrice
-      })),
-      extraCharges: normalizedExtraCharges.map((charge) => ({
-        label: charge.label,
-        amount: charge.amountNumber,
-      })),
-      paidAmount: appliedPayment,
-      date: billDate ? billDate.toISOString() : undefined,
-    }, {
-      onSuccess: () => {
-        toast({ title: "Bill Created", description: "Transaction saved successfully" });
-        setCart([]);
-        setExtraCharges([]);
-        setSelectedCustomer(null);
-        setBillDate(undefined);
-        setIsPaymentOpen(false);
-      }
-    });
+    updateBill(
+      {
+        id: bill.id,
+        bill: {
+          customerId: bill.customerId ?? undefined,
+          items: cart.map((item) => ({
+            productId: item.productId,
+            name: item.name.trim(),
+            quantity: item.quantity,
+            unit: item.unit,
+            baseQuantity: toBaseQuantity(item.quantity, {
+              primaryUnit: item.primaryUnit,
+              secondaryUnit: item.secondaryUnit,
+              unitConversion: item.unitConversion,
+            }, item.unit),
+            baseUnit: getBaseUnit({
+              primaryUnit: item.primaryUnit,
+              secondaryUnit: item.secondaryUnit,
+              unitConversion: item.unitConversion,
+            }),
+            price: item.price,
+            costPrice: item.costPrice,
+          })),
+          extraCharges: normalizedExtraCharges.map((charge) => ({
+            label: charge.label,
+            amount: charge.amountNumber,
+          })),
+          editedBy: editedBy.trim() || undefined,
+          paidAmount: Math.min(payment, grandTotal),
+          date: billDate ? billDate.toISOString() : undefined,
+        },
+      },
+      {
+        onSuccess: () => {
+          toast({ title: "Bill updated", description: "Changes saved successfully." });
+          setLocation(`/bills/${bill.id}`);
+        },
+        onError: (error: Error) => {
+          toast({ title: "Update failed", description: error.message, variant: "destructive" });
+        },
+      },
+    );
   };
+
+  if (isLoading || isProductsLoading || !initialized) {
+    return (
+      <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
+        <Skeleton className="h-8 w-56" />
+        <Skeleton className="h-[620px] w-full rounded-2xl" />
+      </div>
+    );
+  }
+
+  if (!bill) {
+    return (
+      <div className="flex items-center justify-center h-64 text-muted-foreground">
+        Bill not found
+      </div>
+    );
+  }
 
   return (
     <div className="h-[calc(100vh-64px)] md:h-screen flex flex-col md:flex-row overflow-hidden bg-background">
-      
-      {/* Left: Cart Section */}
       <div className="flex-1 flex flex-col h-full border-r border-border relative z-0">
         <div className="p-4 border-b border-border bg-card">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="font-display font-bold text-xl">Current Bill</h2>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">Bill # --</span>
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <Link href={`/bills/${bill.id}`} className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
+                <ArrowLeft className="w-4 h-4" />
+                Back to Bill Details
+              </Link>
+              <h2 className="font-display font-bold text-xl mt-2">Edit Bill #{bill.id}</h2>
+            </div>
+            <div className="text-sm text-muted-foreground">
+              Customer: <span className="font-medium text-foreground">{bill.customer?.name || "Walk-in Customer"}</span>
             </div>
           </div>
-          
-          {/* Customer Selector */}
-          <div className="flex gap-2">
-            <select 
-              className="flex-1 h-10 rounded-lg border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              value={selectedCustomer || ""}
-              onChange={(e) => setSelectedCustomer(e.target.value ? Number(e.target.value) : null)}
-            >
-              <option value="">Walk-in Customer</option>
-              {customers?.map(c => (
-                <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>
-              ))}
-            </select>
-            <Button variant="outline" size="icon" className="shrink-0" title="New Customer">
-              <UserPlus className="w-4 h-4" />
-            </Button>
-          </div>
-          {activeCustomer && (
-            <div className="mt-2 text-xs text-muted-foreground flex justify-between px-1">
-              <span>Balance: <span className={cn(activeCustomer.balance > 0 ? "text-red-500" : "text-green-500")}>{formatCurrencyINR(Number(activeCustomer.balance || 0))}</span></span>
+          {bill.customer?.phone && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Phone: {bill.customer.phone}
+            </div>
+          )}
+          {bill.lastEditedAt && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Last edited on {formatDateTime(bill.lastEditedAt, "dd MMM yyyy, hh:mm a")}
+              {bill.lastEditedBy ? ` by ${bill.lastEditedBy}` : ""}
             </div>
           )}
         </div>
 
-        {/* Cart Items List */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {cart.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-muted-foreground opacity-50">
               <ShoppingBag className="w-16 h-16 mb-4" />
-              <p>Cart is empty</p>
-              <p className="text-sm">Select products to add</p>
+              <p>No items in this bill</p>
+              <p className="text-sm">Add products to continue editing</p>
             </div>
           ) : (
             cart.map((item) => (
-              <div key={item.tempId} className="bg-card p-3 rounded-xl border border-border shadow-sm flex items-center justify-between group animate-in slide-in-from-left-2 duration-300">
-                <div className="flex-1">
-                  <h4 className="font-medium line-clamp-1">{item.name}</h4>
+              <div key={item.tempId} className="bg-card p-3 rounded-xl border border-border shadow-sm flex items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  {item.productId ? (
+                    <h4 className="font-medium line-clamp-1">{item.name}</h4>
+                  ) : (
+                    <Input
+                      value={item.name}
+                      onChange={(e) => setItemName(item.tempId, e.target.value)}
+                      className="h-9"
+                      placeholder="Custom item name"
+                    />
+                  )}
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                     <span>Selling Price</span>
                     <Input
@@ -376,10 +510,13 @@ export default function Pos() {
                   <div className="font-bold font-mono">{formatCurrencyINR(item.price * item.quantity)}</div>
                   <div className="flex items-center gap-2">
                     <div className="flex items-center border border-border rounded-lg bg-background">
-                      <button 
+                      <button
+                        type="button"
                         onClick={() => updateQuantity(item.tempId, -1)}
                         className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium"
-                      >-</button>
+                      >
+                        -
+                      </button>
                       <Input
                         type="number"
                         min="1"
@@ -388,24 +525,28 @@ export default function Pos() {
                         className="w-12 h-8 text-center text-sm font-medium border-0 focus-visible:ring-0 p-0"
                         onFocus={(e) => e.target.select()}
                       />
-                      <button 
+                      <button
+                        type="button"
                         onClick={() => updateQuantity(item.tempId, 1)}
                         className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium"
-                      >+</button>
+                      >
+                        +
+                      </button>
                     </div>
                     <select
                       className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
                       value={item.unit}
                       onChange={(e) => setUnit(item.tempId, e.target.value as UnitOption)}
                     >
-                      {[item.primaryUnit, ...(item.secondaryUnit ? [item.secondaryUnit] : [])].map((unit) => (
+                      {Array.from(new Set([item.primaryUnit, ...(item.secondaryUnit ? [item.secondaryUnit] : [])])).map((unit) => (
                         <option key={unit} value={unit}>
                           {unit}
                         </option>
                       ))}
                     </select>
                   </div>
-                  <button 
+                  <button
+                    type="button"
                     onClick={() => removeFromCart(item.tempId)}
                     className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
                   >
@@ -417,11 +558,10 @@ export default function Pos() {
           )}
         </div>
 
-        {/* Totals & Actions */}
         <div className="p-4 bg-card border-t border-border shadow-up-lg z-10">
           <div className="space-y-3 mb-4">
             <div className="flex justify-between items-end">
-              <span className="text-muted-foreground">This Bill Total</span>
+              <span className="text-muted-foreground">Current Bill Total</span>
               <span className="text-3xl font-display font-bold text-primary">{formatCurrencyINR(cartTotal)}</span>
             </div>
 
@@ -476,9 +616,10 @@ export default function Pos() {
               </div>
             </div>
           </div>
+
           <div className="grid grid-cols-2 gap-3">
-             <Dialog open={isCustomItemOpen} onOpenChange={setIsCustomItemOpen}>
-             <DialogTrigger asChild>
+            <Dialog open={isCustomItemOpen} onOpenChange={setIsCustomItemOpen}>
+              <DialogTrigger asChild>
                 <Button variant="outline" className="h-12 text-base">
                   <Plus className="w-4 h-4 mr-2" /> Custom Item
                 </Button>
@@ -494,17 +635,17 @@ export default function Pos() {
                     <DialogTitle>Add Custom Item</DialogTitle>
                   </DialogHeader>
                   <div className="grid gap-4 py-4">
-                    <Input 
-                      placeholder="Item Name" 
-                      value={customItem.name} 
-                      onChange={e => setCustomItem({...customItem, name: e.target.value})}
+                    <Input
+                      placeholder="Item Name"
+                      value={customItem.name}
+                      onChange={(e) => setCustomItem({ ...customItem, name: e.target.value })}
                     />
                     <div className="grid grid-cols-2 gap-4">
-                      <Input 
-                        type="number" 
-                        placeholder="Price" 
-                        value={customItem.price} 
-                        onChange={e => setCustomItem({...customItem, price: e.target.value})}
+                      <Input
+                        type="number"
+                        placeholder="Price"
+                        value={customItem.price}
+                        onChange={(e) => setCustomItem({ ...customItem, price: e.target.value })}
                       />
                       <select
                         className="h-10 rounded-md border border-input bg-background px-3 text-sm"
@@ -518,38 +659,37 @@ export default function Pos() {
                         ))}
                       </select>
                     </div>
-                    <Input 
-                      type="number" 
-                      placeholder="Qty" 
-                      value={customItem.quantity} 
-                      onChange={e => setCustomItem({...customItem, quantity: e.target.value})}
+                    <Input
+                      type="number"
+                      placeholder="Qty"
+                      value={customItem.quantity}
+                      onChange={(e) => setCustomItem({ ...customItem, quantity: e.target.value })}
                     />
                   </div>
                   <DialogFooter>
-                    <Button type="submit">Add to Cart</Button>
+                    <Button type="submit">Add to Bill</Button>
                   </DialogFooter>
                 </form>
               </DialogContent>
             </Dialog>
 
-            <Button 
+            <Button
               className="h-12 text-base font-bold bg-primary hover:bg-primary/90 shadow-lg shadow-primary/25"
-              onClick={handleCheckout}
+              onClick={openReview}
               disabled={cart.length === 0}
             >
-              Pay & Save <Save className="w-4 h-4 ml-2" />
+              Save Changes <Save className="w-4 h-4 ml-2" />
             </Button>
           </div>
         </div>
       </div>
 
-      {/* Right: Product Selector (Hidden on Mobile unless searching) */}
       <div className="hidden md:flex flex-col w-[400px] bg-muted/30 h-full">
         <div className="p-4 border-b border-border bg-card sticky top-0 z-10">
           <div className="relative">
             <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-            <Input 
-              placeholder="Search products..." 
+            <Input
+              placeholder="Search products..."
               className="pl-10 h-10 bg-muted/50 border-transparent focus:bg-background focus:border-primary transition-all"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
@@ -563,6 +703,7 @@ export default function Pos() {
             {filteredProducts?.map((product) => (
               <button
                 key={product.id}
+                type="button"
                 onClick={() => openProductPriceDialog(product)}
                 className="flex flex-col items-start p-3 bg-card border border-border/50 hover:border-primary/50 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 rounded-xl text-left group"
               >
@@ -585,11 +726,6 @@ export default function Pos() {
               </button>
             ))}
           </div>
-          {filteredProducts?.length === 0 && (
-            <div className="text-center p-8 text-muted-foreground text-sm">
-              No products found.
-            </div>
-          )}
         </div>
       </div>
 
@@ -598,7 +734,7 @@ export default function Pos() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              addToCart();
+              addSelectedProductToCart();
             }}
           >
             <DialogHeader>
@@ -635,27 +771,24 @@ export default function Pos() {
               <Button type="button" variant="outline" onClick={() => setPendingProduct(null)}>
                 Cancel
               </Button>
-              <Button type="submit">
-                Add to Bill
-              </Button>
+              <Button type="submit">Add to Bill</Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      {/* Payment Dialog */}
-      <Dialog open={isPaymentOpen} onOpenChange={setIsPaymentOpen}>
+      <Dialog open={isReviewOpen} onOpenChange={setIsReviewOpen}>
         <DialogContent className="sm:max-w-md">
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              submitBill();
+              submitUpdate();
             }}
           >
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <CreditCard className="w-5 h-5 text-primary" />
-                Finalize Payment
+                Finalize Bill Update
               </DialogTitle>
             </DialogHeader>
             <div className="grid gap-6 py-4">
@@ -679,34 +812,23 @@ export default function Pos() {
                   </div>
                 </div>
               </div>
-              
+
               <div className="space-y-2">
-                <label className="text-sm font-medium">Amount Received</label>
+                <label className="text-sm font-medium">Paid Amount</label>
                 <div className="relative">
                   <IndianRupee className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
-                  <Input 
-                    type="number" 
+                  <Input
+                    type="number"
                     className="pl-10 h-12 text-lg font-mono"
                     value={paidAmount}
                     onChange={(e) => setPaidAmount(e.target.value)}
                     onFocus={(e) => e.target.select()}
                   />
                 </div>
-                <div className="flex justify-between text-sm px-1">
-                  <span className="text-muted-foreground">Change to return:</span>
-                  <span className={cn(
-                    "font-bold",
-                    Number(paidAmount) - grandTotal >= 0 ? "text-green-600" : "text-red-500"
-                  )}>
-                    {Number(paidAmount) - grandTotal >= 0 
-                      ? formatCurrencyINR(Number(paidAmount) - grandTotal)
-                      : `Due: ${formatCurrencyINR(grandTotal - Number(paidAmount))}`
-                    }
-                  </span>
-                </div>
               </div>
+
               <div className="space-y-2">
-                <label className="text-sm font-medium">Bill Date (Optional)</label>
+                <label className="text-sm font-medium">Bill Date</label>
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button
@@ -714,11 +836,11 @@ export default function Pos() {
                       variant="outline"
                       className={cn(
                         "w-full justify-start text-left font-normal",
-                        !billDate && "text-muted-foreground"
+                        !billDate && "text-muted-foreground",
                       )}
                     >
                       <CalendarIcon className="mr-2 h-4 w-4" />
-                      {billDate ? format(billDate, "PPP") : <span>Pick a date (defaults to today)</span>}
+                      {billDate ? format(billDate, "PPP") : <span>Pick a date</span>}
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent className="w-auto p-0">
@@ -731,14 +853,23 @@ export default function Pos() {
                   </PopoverContent>
                 </Popover>
               </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Edited By (Optional)</label>
+                <Input
+                  value={editedBy}
+                  onChange={(e) => setEditedBy(e.target.value)}
+                  placeholder="Enter editor name"
+                  maxLength={80}
+                />
+              </div>
             </div>
             <DialogFooter className="gap-2 sm:gap-0">
-              <Button type="button" variant="outline" onClick={() => {
-                setIsPaymentOpen(false);
-                setBillDate(undefined);
-              }}>Cancel</Button>
+              <Button type="button" variant="outline" onClick={() => setIsReviewOpen(false)}>
+                Cancel
+              </Button>
               <Button type="submit" disabled={isSaving} className="bg-green-600 hover:bg-green-700 text-white w-full sm:w-auto">
-                {isSaving ? "Saving..." : "Complete Order"}
+                {isSaving ? "Saving..." : "Save Bill Changes"}
               </Button>
             </DialogFooter>
           </form>

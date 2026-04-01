@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
@@ -5,6 +6,18 @@ import { createServer } from "http";
 
 const app = express();
 const httpServer = createServer(app);
+
+httpServer.on("error", (err: any) => {
+  // Friendly startup errors (esp. on Windows when a previous dev server is still running)
+  if (err?.code === "EADDRINUSE") {
+    const port = parseInt(process.env.PORT || "5000", 10);
+    console.error(
+      `Port ${port} is already in use. Stop the other process or set PORT to a different value (e.g. PORT=5001).`,
+    );
+    process.exit(1);
+  }
+  throw err;
+});
 
 declare module "http" {
   interface IncomingMessage {
@@ -90,14 +103,15 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
+
+  // NOTE: reusePort is not supported on Windows; enabling it there causes ENOTSUP.
+  // Only enable reusePort on platforms where it's known to work (e.g., Linux/macOS).
+  const listenOptions: any =
+    process.platform === "win32"
+      ? { port, host: "0.0.0.0" }
+      : { port, host: "0.0.0.0", reusePort: true };
+
+  httpServer.listen(listenOptions, () => {
+    log(`serving on port ${port}`);
+  });
 })();

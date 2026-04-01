@@ -10,8 +10,21 @@ import Pos from "@/pages/Pos";
 import Customers from "@/pages/Customers";
 import CustomerDetails from "@/pages/CustomerDetails";
 import Products from "@/pages/Products";
+import Accounts from "@/pages/Accounts";
+import AccountDetails from "@/pages/AccountDetails";
+import AccountInvestmentDetails from "@/pages/AccountInvestmentDetails";
+import Staff from "@/pages/Staff";
+import Inventory from "@/pages/Inventory";
+import Reporting from "@/pages/Reporting";
+import AdvancedReports from "@/pages/advancedReports";
 import Bills from "@/pages/Bills";
 import BillDetails from "@/pages/BillDetails";
+import BillEdit from "@/pages/BillEdit";
+import Quotations from "@/pages/Quotations";
+import QuotationCreate from "@/pages/QuotationCreate";
+import QuotationEdit from "@/pages/QuotationEdit";
+import QuotationDetails from "@/pages/QuotationDetails";
+import Ops from "@/pages/Ops";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -22,8 +35,21 @@ function Router() {
       <Route path="/customers" component={Customers} />
       <Route path="/customers/:id" component={CustomerDetails} />
       <Route path="/products" component={Products} />
+      <Route path="/accounts" component={Accounts} />
+      <Route path="/accounts/investment" component={AccountInvestmentDetails} />
+      <Route path="/accounts/:id" component={AccountDetails} />
+      <Route path="/staff" component={Staff} />
+      <Route path="/inventory" component={Inventory} />
+      <Route path="/reporting" component={Reporting} />
+      <Route path="/advanced-reports" component={AdvancedReports} />
+      <Route path="/ops" component={Ops} />
       <Route path="/bills" component={Bills} />
+      <Route path="/bills/:id/edit" component={BillEdit} />
       <Route path="/bills/:id" component={BillDetails} />
+      <Route path="/quotations" component={Quotations} />
+      <Route path="/quotations/new" component={QuotationCreate} />
+      <Route path="/quotations/:id/edit" component={QuotationEdit} />
+      <Route path="/quotations/:id" component={QuotationDetails} />
       <Route component={NotFound} />
     </Switch>
   );
