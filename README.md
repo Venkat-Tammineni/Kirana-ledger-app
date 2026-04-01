@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Kirana POS
 
 ## Local development (Windows)
@@ -26,3 +27,7 @@ npm run check
 ```
 
 
+=======
+# Kirana-ledger-app
+Kirana shop ledger management app
+>>>>>>> 2f75ba841f7d0dfa44a2247ffffd44c09866c371
