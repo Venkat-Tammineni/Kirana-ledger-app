@@ -10,16 +10,11 @@ import { bulkAdjustStock, recurringPurchase } from "./services/inventory-service
 import { registerAdvancedReportRoutes } from "./routes/advanced-reports";
 import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { bills, billItems, customers } from "@shared/schema";
+import { formatIST, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
 
 function parseDateOnlyInput(value?: string) {
   if (!value) return undefined;
-
-  const [year, month, day] = value.split("-").map(Number);
-  if (!year || !month || !day) {
-    throw new Error("Invalid date");
-  }
-
-  return new Date(year, month - 1, day);
+  return parseISTDateOnly(value);
 }
 
 export async function registerRoutes(
@@ -192,7 +187,7 @@ export async function registerRoutes(
       const entry = await storage.createInvestmentEntry({
         amount: input.amount,
         note: input.note,
-        date: input.date ? new Date(input.date) : undefined,
+        date: input.date ? parseISTDateTime(input.date) : undefined,
       });
       res.status(201).json({
         id: entry.id,
@@ -316,7 +311,7 @@ export async function registerRoutes(
         amount: input.amount.toString(),
         note: input.note || "Manual repayment",
         billId: null,
-        date: input.date ? new Date(input.date) : undefined,
+        date: input.date ? parseISTDateTime(input.date) : undefined,
       });
       res.status(201).json(payment);
     } catch (err) {
@@ -338,7 +333,7 @@ export async function registerRoutes(
         customerId: id,
         amount: input.amount,
         note: input.note || "Manual credit",
-        createdAt: input.date ? new Date(input.date) : undefined,
+        createdAt: input.date ? parseISTDateTime(input.date) : undefined,
       });
       const ledger = await storage.getCustomerLedger(id);
       const latestEntry = ledger.find((entry) => entry.id === ledgerEntry.id);
@@ -396,13 +391,13 @@ export async function registerRoutes(
       ...statement.bills.map((bill) => [
         "Bill",
         `#${bill.id}`,
-        bill.date?.toISOString() || "",
+        bill.date ? formatIST(bill.date, "dd MMM yyyy, hh:mm a") : "",
         Number(bill.totalAmount || 0).toFixed(2),
       ]),
       ...statement.payments.map((payment) => [
         "Payment",
         `#${payment.id}`,
-        payment.date?.toISOString() || "",
+        payment.date ? formatIST(payment.date, "dd MMM yyyy, hh:mm a") : "",
         Number(payment.amount || 0).toFixed(2),
       ]),
     ];
@@ -715,10 +710,8 @@ export async function registerRoutes(
   app.get(api.reporting.profit.path, async (req, res) => {
     try {
       const input = api.reporting.profit.input.parse(req.query);
-      const startDate = new Date(input.startDate);
-      const endDate = new Date(input.endDate);
-      // Set end date to end of day
-      endDate.setHours(23, 59, 59, 999);
+      const { start: startDate } = getISTDayBounds(input.startDate);
+      const { end: endDate } = getISTDayBounds(input.endDate);
       
       const report = await storage.getProfitReport(startDate, endDate);
       res.json(report);
@@ -734,10 +727,8 @@ export async function registerRoutes(
   app.get(api.reporting.customerProfit.path, async (req, res) => {
     try {
       const input = api.reporting.customerProfit.input.parse(req.query);
-      const startDate = new Date(input.startDate);
-      const endDate = new Date(input.endDate);
-      // Set end date to end of day
-      endDate.setHours(23, 59, 59, 999);
+      const { start: startDate } = getISTDayBounds(input.startDate);
+      const { end: endDate } = getISTDayBounds(input.endDate);
       
       const report = await storage.getCustomerProfitReport(startDate, endDate);
       res.json(report);
@@ -752,8 +743,8 @@ export async function registerRoutes(
 
   app.get(api.exports.salesCsv.path, async (req, res) => {
     try {
-      const startDate = req.query.startDate ? new Date(String(req.query.startDate)) : undefined;
-      const endDate = req.query.endDate ? new Date(String(req.query.endDate)) : undefined;
+      const startDate = req.query.startDate ? getISTDayBounds(String(req.query.startDate)).start : undefined;
+      const endDate = req.query.endDate ? getISTDayBounds(String(req.query.endDate)).end : undefined;
 
       const filters = [eq(bills.status, "completed")];
       if (startDate) filters.push(gte(bills.date, startDate));
@@ -781,7 +772,7 @@ export async function registerRoutes(
         ["Bill ID", "Date", "Customer", "Item", "Qty", "Price", "Line Total", "Bill Total", "Bill Profit"],
         ...rows.map((row) => [
           row.billId,
-          row.billDate?.toISOString() || "",
+          row.billDate ? formatIST(row.billDate, "dd MMM yyyy, hh:mm a") : "",
           row.customerName || "Walk-in Customer",
           row.itemName,
           row.quantity,

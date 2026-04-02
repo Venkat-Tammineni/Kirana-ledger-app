@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
+import { formatCurrencyINR, formatDate, formatDateTime, toISTDateInputValue } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
+import { getISTDateKey, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
 
 type InvestmentSourceFilter = "all" | "account_spent" | "manual";
 
@@ -28,7 +29,7 @@ export default function AccountInvestmentDetails() {
     if (!details) return [];
 
     return details.entries.filter((entry) => {
-      const entryDate = entry.date ? new Date(entry.date) : null;
+      const entryDate = entry.date ? parseISTDateTime(entry.date) : null;
       if (!entryDate) return false;
 
       if (sourceFilter !== "all" && entry.source !== sourceFilter) {
@@ -36,14 +37,12 @@ export default function AccountInvestmentDetails() {
       }
 
       if (fromDate) {
-        const start = new Date(fromDate);
-        start.setHours(0, 0, 0, 0);
+        const start = parseISTDateOnly(fromDate);
         if (entryDate < start) return false;
       }
 
       if (toDate) {
-        const end = new Date(toDate);
-        end.setHours(23, 59, 59, 999);
+        const { end } = getISTDayBounds(toDate);
         if (entryDate > end) return false;
       }
 
@@ -55,7 +54,7 @@ export default function AccountInvestmentDetails() {
     const groups = new Map<string, typeof filteredEntries>();
 
     filteredEntries.forEach((entry) => {
-      const key = entry.date ? formatDate(entry.date, "yyyy-MM-dd") : "unknown";
+      const key = entry.date ? getISTDateKey(entry.date) : "unknown";
       const existing = groups.get(key) || [];
       existing.push(entry);
       groups.set(key, existing);
@@ -72,7 +71,7 @@ export default function AccountInvestmentDetails() {
       {
         amount: numericAmount,
         note: note.trim(),
-        date: date ? new Date(date).toISOString() : undefined,
+        date: date ? toISTDateInputValue(date) : undefined,
       },
       {
         onSuccess: () => {

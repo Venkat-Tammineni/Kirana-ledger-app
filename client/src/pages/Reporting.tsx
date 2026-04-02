@@ -5,9 +5,9 @@ import { BarChart3, TrendingUp, TrendingDown, DollarSign, Users, Calendar, Filte
 import { Button } from "@/components/ui/button";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { format, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from "date-fns";
+import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCurrencyINR } from "@/lib/format";
+import { formatCurrencyINR, formatDate, toDateInputString } from "@/lib/format";
 
 type DateRange = 'daily' | 'weekly' | 'monthly' | 'custom';
 
@@ -48,11 +48,13 @@ export default function Reporting() {
   };
 
   const { start, end } = getDateRange();
+  const startDateParam = toDateInputString(start);
+  const endDateParam = toDateInputString(end);
 
   const { data: profitReport, isLoading: profitLoading } = useQuery({
-    queryKey: [api.reporting.profit.path, start.toISOString(), end.toISOString()],
+    queryKey: [api.reporting.profit.path, startDateParam, endDateParam],
     queryFn: async () => {
-      const url = buildUrl(api.reporting.profit.path) + `?startDate=${start.toISOString()}&endDate=${end.toISOString()}`;
+      const url = buildUrl(api.reporting.profit.path) + `?startDate=${startDateParam}&endDate=${endDateParam}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch profit report");
       return api.reporting.profit.responses[200].parse(await res.json());
@@ -60,9 +62,9 @@ export default function Reporting() {
   });
 
   const { data: customerProfit, isLoading: customerProfitLoading } = useQuery({
-    queryKey: [api.reporting.customerProfit.path, start.toISOString(), end.toISOString()],
+    queryKey: [api.reporting.customerProfit.path, startDateParam, endDateParam],
     queryFn: async () => {
-      const url = buildUrl(api.reporting.customerProfit.path) + `?startDate=${start.toISOString()}&endDate=${end.toISOString()}`;
+      const url = buildUrl(api.reporting.customerProfit.path) + `?startDate=${startDateParam}&endDate=${endDateParam}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch customer profit report");
       return api.reporting.customerProfit.responses[200].parse(await res.json());
@@ -124,7 +126,7 @@ export default function Reporting() {
                 <PopoverTrigger asChild>
                   <Button variant="outline" size="sm" className="w-[200px] justify-start text-left font-normal">
                     <Calendar className="mr-2 h-4 w-4" />
-                    {customStartDate ? format(customStartDate, "PPP") : <span>Start date</span>}
+                    {customStartDate ? formatDate(customStartDate, "PPP") : <span>Start date</span>}
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-0">
@@ -141,7 +143,7 @@ export default function Reporting() {
                 <PopoverTrigger asChild>
                   <Button variant="outline" size="sm" className="w-[200px] justify-start text-left font-normal">
                     <Calendar className="mr-2 h-4 w-4" />
-                    {customEndDate ? format(customEndDate, "PPP") : <span>End date</span>}
+                    {customEndDate ? formatDate(customEndDate, "PPP") : <span>End date</span>}
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-0">
@@ -157,7 +159,7 @@ export default function Reporting() {
           )}
 
           <div className="ml-auto text-sm text-muted-foreground">
-            {format(start, "MMM dd, yyyy")} - {format(end, "MMM dd, yyyy")}
+            {formatDate(start, "MMM dd, yyyy")} - {formatDate(end, "MMM dd, yyyy")}
           </div>
         </div>
       </div>

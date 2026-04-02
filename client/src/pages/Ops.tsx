@@ -138,8 +138,8 @@ export default function Ops() {
             onClick={async () => {
               try {
                 const params = new URLSearchParams();
-                if (startDate) params.set("startDate", new Date(startDate).toISOString());
-                if (endDate) params.set("endDate", new Date(endDate).toISOString());
+                if (startDate) params.set("startDate", startDate);
+                if (endDate) params.set("endDate", endDate);
                 const url = `${api.exports.salesCsv.path}${params.toString() ? `?${params.toString()}` : ""}`;
                 await downloadCsv(url, "sales-export.csv");
               } catch (error) {
@@ -185,4 +185,3 @@ export default function Ops() {
     </div>
   );
 }
-

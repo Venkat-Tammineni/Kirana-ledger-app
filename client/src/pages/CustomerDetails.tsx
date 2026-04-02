@@ -26,7 +26,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import { cn } from "@/lib/utils";
-import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
+import { formatCurrencyINR, formatDate, formatDateTime, toDateInputString, toISTDateTimeStringForApi } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
 
 type EntryMode = "CREDIT" | "PAYMENT" | null;
@@ -35,7 +35,7 @@ export default function CustomerDetails() {
   const [, params] = useRoute("/customers/:id");
   const id = Number(params?.id);
   const [selectedProfitDate, setSelectedProfitDate] = useState<Date>(new Date());
-  const selectedProfitDateKey = formatDate(selectedProfitDate, "yyyy-MM-dd");
+  const selectedProfitDateKey = toDateInputString(selectedProfitDate);
   const { data: customer, isLoading } = useCustomer(id, selectedProfitDateKey);
   const { mutate: repayCustomer, isPending: isRepaying } = useRepayCustomer();
   const { mutate: addCustomerCredit, isPending: isAddingCredit } = useAddCustomerCredit();
@@ -88,7 +88,7 @@ export default function CustomerDetails() {
           customerId: id,
           amount,
           note: entryNote || "Manual payment",
-          date: entryDate ? entryDate.toISOString() : undefined,
+          date: entryDate ? toISTDateTimeStringForApi(entryDate) : undefined,
         },
         {
           onSuccess: () => {
@@ -108,7 +108,7 @@ export default function CustomerDetails() {
         customerId: id,
         amount,
         note: entryNote || "Manual credit",
-        date: entryDate ? entryDate.toISOString() : undefined,
+        date: entryDate ? toISTDateTimeStringForApi(entryDate) : undefined,
       },
       {
         onSuccess: () => {

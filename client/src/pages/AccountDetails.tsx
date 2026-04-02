@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
+import { getISTDateKey, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
 
 type TransactionTypeFilter = "all" | "credit" | "spent";
 
@@ -30,7 +31,7 @@ export default function AccountDetails() {
     if (!details) return [];
 
     return details.transactions.filter((txn) => {
-      const txnDate = txn.date ? new Date(txn.date) : null;
+      const txnDate = txn.date ? parseISTDateTime(txn.date) : null;
       if (!txnDate) return false;
 
       if (typeFilter !== "all" && txn.type !== typeFilter) {
@@ -38,14 +39,12 @@ export default function AccountDetails() {
       }
 
       if (fromDate) {
-        const start = new Date(fromDate);
-        start.setHours(0, 0, 0, 0);
+        const start = parseISTDateOnly(fromDate);
         if (txnDate < start) return false;
       }
 
       if (toDate) {
-        const end = new Date(toDate);
-        end.setHours(23, 59, 59, 999);
+        const { end } = getISTDayBounds(toDate);
         if (txnDate > end) return false;
       }
 
@@ -57,7 +56,7 @@ export default function AccountDetails() {
     const groups = new Map<string, typeof filteredTransactions>();
 
     filteredTransactions.forEach((txn) => {
-      const key = txn.date ? formatDate(txn.date, "yyyy-MM-dd") : "unknown";
+      const key = txn.date ? getISTDateKey(txn.date) : "unknown";
       const existing = groups.get(key) || [];
       existing.push(txn);
       groups.set(key, existing);

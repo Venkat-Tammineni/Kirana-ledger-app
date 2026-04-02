@@ -12,8 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { formatCurrencyINR, formatDateTime } from "@/lib/format";
-import { format } from "date-fns";
+import { formatCurrencyINR, formatDate, formatDateTime, toISTDateTimeStringForApi } from "@/lib/format";
 import { deriveUnitPriceFromBase, getBaseUnit, getDefaultSalesUnit, getPrimaryUnit, hasSecondaryUnit, normalizeUnitPriceToBase, toBaseQuantity, UNIT_OPTIONS, type UnitOption } from "@shared/units";
 import type { CreateQuotationInput } from "@shared/routes";
 import type { Bill, Customer, Quotation, QuotationCharge, QuotationItem } from "@shared/schema";
@@ -197,7 +196,7 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
       extraCharges: summaryCharges.map((charge) => ({ label: charge.label, amount: charge.amountNumber })),
       notes: notes.trim() || undefined,
       editedBy: editedBy.trim() || undefined,
-      date: quoteDate ? quoteDate.toISOString() : undefined,
+      date: quoteDate ? toISTDateTimeStringForApi(quoteDate) : undefined,
     });
   };
 
@@ -227,7 +226,7 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
             </select>
             <Popover>
               <PopoverTrigger asChild>
-                <Button type="button" variant="outline" className={cn("w-full justify-start text-left font-normal", !quoteDate && "text-muted-foreground")} disabled={isConverted}><CalendarIcon className="mr-2 h-4 w-4" />{quoteDate ? format(quoteDate, "PPP") : <span>Pick quotation date</span>}</Button>
+                <Button type="button" variant="outline" className={cn("w-full justify-start text-left font-normal", !quoteDate && "text-muted-foreground")} disabled={isConverted}><CalendarIcon className="mr-2 h-4 w-4" />{quoteDate ? formatDate(quoteDate, "PPP") : <span>Pick quotation date</span>}</Button>
               </PopoverTrigger>
               <PopoverContent className="w-auto p-0"><Calendar mode="single" selected={quoteDate} onSelect={setQuoteDate} initialFocus /></PopoverContent>
             </Popover>

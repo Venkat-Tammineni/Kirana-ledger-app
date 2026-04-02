@@ -10,6 +10,7 @@ import {
   products,
   stockAdjustments,
 } from "@shared/schema";
+import { dateFromISTParts, formatIST, getISTDayBounds, getISTParts } from "@shared/timezone";
 import { storage } from "../storage";
 
 export type AdvancedRange = {
@@ -24,16 +25,17 @@ function toNumber(value: unknown) {
 
 function formatBucketLabel(date: Date, granularity: AdvancedRange["granularity"]) {
   if (granularity === "month") {
-    return date.toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+    return formatIST(date, "MMM yyyy");
   }
   if (granularity === "week") {
-    const start = new Date(date);
-    const day = start.getDay();
-    const diff = day === 0 ? -6 : 1 - day;
-    start.setDate(start.getDate() + diff);
-    return `${start.toLocaleDateString("en-IN", { day: "2-digit", month: "short" })} week`;
+    const parts = getISTParts(date);
+    const midnight = dateFromISTParts(parts.year, parts.month, parts.day);
+    const weekday = midnight.getUTCDay();
+    const diff = weekday === 0 ? -6 : 1 - weekday;
+    const weekStart = new Date(midnight.getTime() + diff * 24 * 60 * 60 * 1000);
+    return `${formatIST(weekStart, "dd MMM")} week`;
   }
-  return date.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+  return formatIST(date, "dd MMM");
 }
 
 function getRangeFilters(column: any, range: AdvancedRange) {
@@ -167,7 +169,7 @@ export async function getAdvancedSalesReport(range: AdvancedRange) {
     return {
       invoiceNo: `INV-${bill.id}`,
       customer: bill.customerName || "Walk-in Customer",
-      date: bill.date?.toISOString() || "",
+      date: bill.date ? formatIST(bill.date, "dd MMM yyyy, hh:mm a") : "",
       itemsCount,
       subtotal,
       gst: 0,
@@ -243,7 +245,7 @@ export async function getAdvancedPurchaseReport(range: AdvancedRange) {
     return {
       invoiceNo: `PUR-${row.id}`,
       supplier: row.reason || "Inventory Purchase",
-      date: row.date?.toISOString() || "",
+      date: row.date ? formatIST(row.date, "dd MMM yyyy, hh:mm a") : "",
       itemsCount: 1,
       subtotal: total,
       gst: 0,
@@ -383,7 +385,7 @@ export async function getAdvancedOutstanding() {
       continue;
     }
 
-    const ageDays = Math.floor((Date.now() - new Date(row.oldestDue).getTime()) / (1000 * 60 * 60 * 24));
+    const ageDays = Math.floor((getISTDayBounds(new Date()).start.getTime() - getISTDayBounds(row.oldestDue).start.getTime()) / (1000 * 60 * 60 * 24));
     if (ageDays <= 7) aging.bucket0To7 += row.balance;
     else if (ageDays <= 30) aging.bucket8To30 += row.balance;
     else if (ageDays <= 60) aging.bucket31To60 += row.balance;

@@ -10,8 +10,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { formatCurrencyINR, formatDateTime, toLocalDateTimeString } from "@/lib/format";
-import { format } from "date-fns";
+import { formatCurrencyINR, formatDate, formatDateTime, toISTDateTimeStringForApi } from "@/lib/format";
 import {
   deriveUnitPriceFromBase,
   getBaseUnit,
@@ -452,7 +451,7 @@ export default function BillEdit() {
           })),
           editedBy: editedBy.trim() || undefined,
           paidAmount: Math.min(payment, grandTotal),
-          date: billDate ? toLocalDateTimeString(billDate) : undefined,
+          date: billDate ? toISTDateTimeStringForApi(billDate) : undefined,
         },
       },
       {
@@ -882,7 +881,7 @@ export default function BillEdit() {
                       )}
                     >
                       <CalendarIcon className="mr-2 h-4 w-4" />
-                      {billDate ? format(billDate, "PPP") : <span>Pick a date</span>}
+                      {billDate ? formatDate(billDate, "PPP") : <span>Pick a date</span>}
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent className="w-auto p-0">

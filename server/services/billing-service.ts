@@ -12,6 +12,7 @@ import {
   type CreateBillRequest,
   type UpdateBillRequest,
 } from "@shared/schema";
+import { parseISTDateTime } from "@shared/timezone";
 import { getBaseUnit, getDefaultSalesUnit, toBaseQuantity } from "@shared/units";
 
 type AppDb = NodePgDatabase<any>;
@@ -126,7 +127,7 @@ async function prepareBillMutation(
   const paymentApplied = Math.min(Math.max(data.paidAmount || 0, 0), grandTotal);
   const billPaidAmount = Math.min(paymentApplied, totalAmount);
   const oldBalancePaidAmount = Math.max(paymentApplied - billPaidAmount, 0);
-  const billDate = data.date ? new Date(data.date) : new Date();
+  const billDate = data.date ? parseISTDateTime(data.date) : new Date();
 
   let totalProfit = 0;
   const billItemsData: PreparedBillMutation["billItemsData"] = [];

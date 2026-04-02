@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { api } from "@shared/routes";
+import { getISTDayBounds } from "@shared/timezone";
 import {
   getAdvancedCashbook,
   getAdvancedOutstanding,
@@ -13,9 +14,8 @@ import {
 } from "../services/advanced-report-service";
 
 function parseRange(input: z.infer<typeof api.advancedReports.overview.input>): AdvancedRange {
-  const startDate = new Date(input.startDate);
-  const endDate = new Date(input.endDate);
-  endDate.setHours(23, 59, 59, 999);
+  const { start: startDate } = getISTDayBounds(input.startDate);
+  const { end: endDate } = getISTDayBounds(input.endDate);
 
   return {
     startDate,

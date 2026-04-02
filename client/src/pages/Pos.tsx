@@ -8,8 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Calendar } from "@/components/ui/calendar";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { format } from "date-fns";
-import { formatCurrencyINR, toLocalDateTimeString } from "@/lib/format";
+import { formatCurrencyINR, formatDate, toISTDateTimeStringForApi } from "@/lib/format";
 import {
   deriveUnitPriceFromBase,
   getBaseUnit,
@@ -333,7 +332,7 @@ export default function Pos() {
         amount: charge.amountNumber,
       })),
       paidAmount: appliedPayment,
-      date: billDate ? toLocalDateTimeString(billDate) : undefined,
+      date: billDate ? toISTDateTimeStringForApi(billDate) : undefined,
     }, {
       onSuccess: () => {
         toast({ title: "Bill Created", description: "Transaction saved successfully" });
@@ -755,7 +754,7 @@ export default function Pos() {
                       )}
                     >
                       <CalendarIcon className="mr-2 h-4 w-4" />
-                      {billDate ? format(billDate, "PPP") : <span>Pick a date (defaults to today)</span>}
+                      {billDate ? formatDate(billDate, "PPP") : <span>Pick a date (defaults to today)</span>}
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent className="w-auto p-0">

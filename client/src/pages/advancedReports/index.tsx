@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { format, endOfMonth, endOfQuarter, endOfToday, endOfWeek, startOfMonth, startOfQuarter, startOfToday, startOfWeek } from "date-fns";
+import { endOfMonth, endOfQuarter, endOfToday, endOfWeek, startOfMonth, startOfQuarter, startOfToday, startOfWeek } from "date-fns";
 import { z } from "zod";
 import {
   BarChart3,
@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { formatCurrencyINR, formatDate } from "@/lib/format";
+import { formatCurrencyINR, formatDate, toDateInputString } from "@/lib/format";
 import {
   ChartContainer,
   ChartLegend,
@@ -118,9 +118,9 @@ function resolveRange(preset: AdvancedPreset, customStart: string, customEnd: st
 
 function getBucketLabel(dateValue: string, granularity: AdvancedGranularity) {
   const date = new Date(dateValue);
-  if (granularity === "month") return format(date, "MMM yyyy");
-  if (granularity === "week") return `${format(startOfWeek(date, { weekStartsOn: 1 }), "dd MMM")} week`;
-  return format(date, "dd MMM");
+  if (granularity === "month") return formatDate(date, "MMM yyyy");
+  if (granularity === "week") return `${formatDate(startOfWeek(date, { weekStartsOn: 1 }), "dd MMM")} week`;
+  return formatDate(date, "dd MMM");
 }
 
 function downloadFile(filename: string, content: string, mime: string) {
@@ -153,8 +153,8 @@ export default function AdvancedReports() {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [page, setPage] = useState(1);
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
-  const [customStart, setCustomStart] = useState(format(new Date(), "yyyy-MM-dd"));
-  const [customEnd, setCustomEnd] = useState(format(new Date(), "yyyy-MM-dd"));
+  const [customStart, setCustomStart] = useState(toDateInputString(new Date()));
+  const [customEnd, setCustomEnd] = useState(toDateInputString(new Date()));
   const [seriesVisible, setSeriesVisible] = useState({
     revenue: true,
     cost: true,
@@ -164,8 +164,8 @@ export default function AdvancedReports() {
   const range = useMemo(() => resolveRange(preset, customStart, customEnd), [preset, customStart, customEnd]);
   const queryParams = useMemo(
     () => ({
-      startDate: range.start.toISOString(),
-      endDate: range.end.toISOString(),
+      startDate: toDateInputString(range.start),
+      endDate: toDateInputString(range.end),
       granularity,
     }),
     [range, granularity],
@@ -439,7 +439,7 @@ export default function AdvancedReports() {
   };
 
   const shareReport = async () => {
-    const summary = `${activeExport.title.replace(/-/g, " ")} for ${format(range.start, "dd MMM yyyy")} to ${format(range.end, "dd MMM yyyy")} is ready.`;
+    const summary = `${activeExport.title.replace(/-/g, " ")} for ${formatDate(range.start, "dd MMM yyyy")} to ${formatDate(range.end, "dd MMM yyyy")} is ready.`;
     try {
       await navigator.clipboard.writeText(summary);
       toast({ title: "Share text copied", description: "WhatsApp-ready summary copied to clipboard." });
@@ -480,7 +480,7 @@ export default function AdvancedReports() {
 
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          Range: {format(range.start, "dd MMM yyyy")} - {format(range.end, "dd MMM yyyy")}
+          Range: {formatDate(range.start, "dd MMM yyyy")} - {formatDate(range.end, "dd MMM yyyy")}
         </p>
         {selectedBucket ? (
           <Button variant="outline" size="sm" onClick={() => setSelectedBucket(null)}>

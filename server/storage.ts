@@ -11,6 +11,7 @@ import {
 import { eq, desc, sql, sum, and, inArray } from "drizzle-orm";
 import { createBillTransaction, updateBillTransaction } from "./services/billing-service";
 import { adjustStockTransaction } from "./services/inventory-service";
+import { getISTDateKey, getISTDayBounds, getISTMonthBounds, parseISTDateTime } from "@shared/timezone";
 
 const LEDGER_TABLE_NAME = "ledger_entries";
 
@@ -162,18 +163,11 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   private toDateKey(date: Date) {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    return getISTDateKey(date);
   }
 
   private getDayBounds(date: Date) {
-    const start = new Date(date);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(start);
-    end.setHours(23, 59, 59, 999);
-    return { start, end };
+    return getISTDayBounds(date);
   }
 
   private async getAttendanceRows(staffId: number): Promise<StaffAttendance[]> {
@@ -216,9 +210,7 @@ export class DatabaseStorage implements IStorage {
     const presentDays = attendance.filter((entry) => entry.status === "present").length;
     const absentDays = attendance.filter((entry) => entry.status === "absent").length;
     const attendancePaymentTotal = attendance.reduce((sum, entry) => sum + Number(entry.payment || 0), 0);
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const { start: monthStart, end: monthEnd } = getISTMonthBounds(new Date());
     const currentMonthAttendance = attendance.filter((entry) => {
       const entryDate = new Date(entry.date);
       return entryDate >= monthStart && entryDate <= monthEnd;
@@ -605,10 +597,8 @@ export class DatabaseStorage implements IStorage {
       .from(bills)
       .where(and(eq(bills.customerId, id), eq(bills.status, 'completed')));
 
-    const selectedProfitDate = profitDate ? new Date(profitDate) : new Date();
-    selectedProfitDate.setHours(0, 0, 0, 0);
-    const profitRangeEnd = new Date(selectedProfitDate);
-    profitRangeEnd.setHours(23, 59, 59, 999);
+    const selectedProfitDate = profitDate ? parseISTDateTime(profitDate) : new Date();
+    const { start: profitRangeStart, end: profitRangeEnd } = this.getDayBounds(selectedProfitDate);
 
     const dailyProfitSum = await db.select({ value: sum(bills.totalProfit) })
       .from(bills)
@@ -616,7 +606,7 @@ export class DatabaseStorage implements IStorage {
         and(
           eq(bills.customerId, id),
           eq(bills.status, 'completed'),
-          sql`${bills.date} >= ${selectedProfitDate}`,
+          sql`${bills.date} >= ${profitRangeStart}`,
           sql`${bills.date} <= ${profitRangeEnd}`,
         ),
       );
@@ -1013,7 +1003,7 @@ export class DatabaseStorage implements IStorage {
       const subtotalAmount = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
       const extraChargesTotal = normalizedCharges.reduce((sum, charge) => sum + charge.amount, 0);
       const totalAmount = subtotalAmount + extraChargesTotal;
-      const quotationDate = data.date ? new Date(data.date) : new Date();
+      const quotationDate = data.date ? parseISTDateTime(data.date) : new Date();
 
       const [quotation] = await tx
         .insert(quotations)
@@ -1095,7 +1085,7 @@ export class DatabaseStorage implements IStorage {
         .update(quotations)
         .set({
           customerId: data.customerId ?? null,
-          date: data.date ? new Date(data.date) : existingQuotation.date,
+          date: data.date ? parseISTDateTime(data.date) : existingQuotation.date,
           subtotalAmount: subtotalAmount.toFixed(2),
           extraChargesTotal: extraChargesTotal.toFixed(2),
           totalAmount: totalAmount.toFixed(2),
@@ -1284,8 +1274,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; totalDue: number; activeCustomers: number }> {
-    const today = new Date();
-    today.setHours(0,0,0,0);
+    const { start: today } = this.getDayBounds(new Date());
     
     const salesRes = await db.select({ value: sum(bills.totalAmount) })
       .from(bills)
