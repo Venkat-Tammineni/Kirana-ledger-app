@@ -2,6 +2,7 @@ export const UNIT_OPTIONS = [
   "PCS",
   "BAG",
   "KG",
+  "GRAMS",
   "BOTTLES",
   "BOXES",
   "CANS",
@@ -69,4 +70,3 @@ export function normalizeUnitPriceToBase(price: number, value: UnitShape, unit?:
   if (!multiplier) return price;
   return price / multiplier;
 }
-

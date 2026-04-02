@@ -10,7 +10,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { formatCurrencyINR, formatDateTime } from "@/lib/format";
+import { formatCurrencyINR, formatDateTime, toLocalDateTimeString } from "@/lib/format";
 import { format } from "date-fns";
 import {
   deriveUnitPriceFromBase,
@@ -186,11 +186,53 @@ export default function BillEdit() {
     const defaultUnit = getDefaultSalesUnit(unitConfig);
     const basePrice = Number(product.price || 0);
     const baseCostPrice = Number(product.costPrice || 0);
+    const defaultPrice = deriveUnitPriceFromBase(basePrice, unitConfig, defaultUnit);
+
+    if (defaultPrice > 0) {
+      setCart((prev) => {
+        const existing = prev.find(
+          (item) =>
+            item.productId === product.id &&
+            item.unit === defaultUnit &&
+            Math.abs(item.price - defaultPrice) < 0.0001,
+        );
+
+        if (existing) {
+          return prev.map((item) =>
+            item.productId === product.id &&
+            item.unit === defaultUnit &&
+            Math.abs(item.price - defaultPrice) < 0.0001
+              ? { ...item, quantity: item.quantity + 1 }
+              : item,
+          );
+        }
+
+        return [
+          ...prev,
+          {
+            tempId: crypto.randomUUID(),
+            productId: product.id,
+            name: product.name,
+            price: defaultPrice,
+            basePrice,
+            costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, defaultUnit),
+            baseCostPrice,
+            quantity: 1,
+            unit: defaultUnit,
+            primaryUnit: getPrimaryUnit(unitConfig),
+            secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+            unitConversion: product.unitConversion ?? null,
+          },
+        ];
+      });
+      setSearchTerm("");
+      return;
+    }
 
     setPendingProduct({
       productId: product.id,
       name: product.name,
-      price: deriveUnitPriceFromBase(basePrice, unitConfig, defaultUnit).toString(),
+      price: defaultPrice.toString(),
       baseCostPrice,
       unit: defaultUnit,
       primaryUnit: getPrimaryUnit(unitConfig),
@@ -410,7 +452,7 @@ export default function BillEdit() {
           })),
           editedBy: editedBy.trim() || undefined,
           paidAmount: Math.min(payment, grandTotal),
-          date: billDate ? billDate.toISOString() : undefined,
+          date: billDate ? toLocalDateTimeString(billDate) : undefined,
         },
       },
       {
