@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { endOfMonth, endOfQuarter, endOfToday, endOfWeek, startOfMonth, startOfQuarter, startOfToday, startOfWeek } from "date-fns";
+import { endOfMonth, endOfQuarter, startOfMonth, startOfQuarter, startOfWeek, endOfWeek } from "date-fns";
 import { z } from "zod";
+import { getISTDateKey, getISTDayBounds, getISTMonthBounds, parseISTDateTime } from "@shared/timezone";
 import {
   BarChart3,
   Boxes,
@@ -78,48 +79,64 @@ function getFinancialYearBounds(now: Date) {
 
 function resolveRange(preset: AdvancedPreset, customStart: string, customEnd: string) {
   const now = new Date();
+  const istTodayKey = getISTDateKey(now);
+  const istToday = getISTDayBounds(istTodayKey);
 
   if (preset === "week") {
+    const localTodayInISTDay = new Date(`${istTodayKey}T00:00:00`);
+    const weekStartLocal = startOfWeek(localTodayInISTDay, { weekStartsOn: 1 });
+    const weekEndLocal = endOfWeek(localTodayInISTDay, { weekStartsOn: 1 });
+
     return {
-      start: startOfWeek(now, { weekStartsOn: 1 }),
-      end: endOfWeek(now, { weekStartsOn: 1 }),
+      start: getISTDayBounds(getISTDateKey(weekStartLocal)).start,
+      end: getISTDayBounds(getISTDateKey(weekEndLocal)).end,
     };
   }
 
   if (preset === "month") {
+    const monthBounds = getISTMonthBounds(istTodayKey);
     return {
-      start: startOfMonth(now),
-      end: endOfMonth(now),
+      start: monthBounds.start,
+      end: monthBounds.end,
     };
   }
 
   if (preset === "quarter") {
+    const localTodayInISTDay = new Date(`${istTodayKey}T00:00:00`);
+    const quarterStartLocal = startOfQuarter(localTodayInISTDay);
+    const quarterEndLocal = endOfQuarter(localTodayInISTDay);
+
     return {
-      start: startOfQuarter(now),
-      end: endOfQuarter(now),
+      start: getISTDayBounds(getISTDateKey(quarterStartLocal)).start,
+      end: getISTDayBounds(getISTDateKey(quarterEndLocal)).end,
     };
   }
 
   if (preset === "financialYear") {
-    return getFinancialYearBounds(now);
+    const bounds = getFinancialYearBounds(now);
+    return {
+      start: bounds.start,
+      end: bounds.end,
+    };
   }
 
   if (preset === "custom") {
-    const start = customStart ? new Date(`${customStart}T00:00:00`) : startOfToday();
-    const end = customEnd ? new Date(`${customEnd}T23:59:59.999`) : endOfToday();
-    return { start, end };
+    return {
+      start: customStart ? getISTDayBounds(customStart).start : istToday.start,
+      end: customEnd ? getISTDayBounds(customEnd).end : istToday.end,
+    };
   }
 
   return {
-    start: startOfToday(),
-    end: endOfToday(),
+    start: istToday.start,
+    end: istToday.end,
   };
 }
 
 function getBucketLabel(dateValue: string, granularity: AdvancedGranularity) {
-  const date = new Date(dateValue);
+  const date = parseISTDateTime(dateValue);
   if (granularity === "month") return formatDate(date, "MMM yyyy");
-  if (granularity === "week") return `${formatDate(startOfWeek(date, { weekStartsOn: 1 }), "dd MMM")} week`;
+  if (granularity === "week") return `${formatDate(getISTDayBounds(date).start, "dd MMM")} week`;
   return formatDate(date, "dd MMM");
 }
 
@@ -153,8 +170,8 @@ export default function AdvancedReports() {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [page, setPage] = useState(1);
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
-  const [customStart, setCustomStart] = useState(toDateInputString(new Date()));
-  const [customEnd, setCustomEnd] = useState(toDateInputString(new Date()));
+  const [customStart, setCustomStart] = useState(getISTDateKey(new Date()));
+  const [customEnd, setCustomEnd] = useState(getISTDateKey(new Date()));
   const [seriesVisible, setSeriesVisible] = useState({
     revenue: true,
     cost: true,

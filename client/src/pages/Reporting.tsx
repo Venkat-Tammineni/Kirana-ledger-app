@@ -5,45 +5,52 @@ import { BarChart3, TrendingUp, TrendingDown, DollarSign, Users, Calendar, Filte
 import { Button } from "@/components/ui/button";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrencyINR, formatDate, toDateInputString } from "@/lib/format";
+import { getISTDateKey, getISTDayBounds, getISTMonthBounds, parseISTDateTime } from "@shared/timezone";
 
 type DateRange = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 export default function Reporting() {
+  const todayBounds = getISTDayBounds(new Date());
+
   const [dateRange, setDateRange] = useState<DateRange>('daily');
-  const [customStartDate, setCustomStartDate] = useState<Date | undefined>(startOfDay(new Date()));
-  const [customEndDate, setCustomEndDate] = useState<Date | undefined>(endOfDay(new Date()));
+  const [customStartDate, setCustomStartDate] = useState<Date | undefined>(todayBounds.start);
+  const [customEndDate, setCustomEndDate] = useState<Date | undefined>(todayBounds.end);
 
   const getDateRange = () => {
-    const now = new Date();
+    const today = new Date();
+    const todayKey = getISTDateKey(today);
+
     switch (dateRange) {
       case 'daily':
+        return getISTDayBounds(today);
+      case 'weekly': {
+        const weekStart = new Date(`${todayKey}T00:00:00`);
+        const firstDayOfWeek = new Date(weekStart);
+        firstDayOfWeek.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+        const lastDayOfWeek = new Date(firstDayOfWeek);
+        lastDayOfWeek.setDate(firstDayOfWeek.getDate() + 6);
+
         return {
-          start: startOfDay(now),
-          end: endOfDay(now),
+          start: getISTDayBounds(toDateInputString(firstDayOfWeek)).start,
+          end: getISTDayBounds(toDateInputString(lastDayOfWeek)).end,
         };
-      case 'weekly':
+      }
+      case 'monthly': {
+        const monthBounds = getISTMonthBounds(today);
         return {
-          start: startOfDay(startOfWeek(now, { weekStartsOn: 1 })),
-          end: endOfDay(endOfWeek(now, { weekStartsOn: 1 })),
+          start: monthBounds.start,
+          end: monthBounds.end,
         };
-      case 'monthly':
-        return {
-          start: startOfDay(startOfMonth(now)),
-          end: endOfDay(endOfMonth(now)),
-        };
+      }
       case 'custom':
         return {
-          start: customStartDate || startOfDay(now),
-          end: customEndDate || endOfDay(now),
+          start: customStartDate || todayBounds.start,
+          end: customEndDate || todayBounds.end,
         };
       default:
-        return {
-          start: startOfDay(now),
-          end: endOfDay(now),
-        };
+        return getISTDayBounds(today);
     }
   };
 
@@ -133,7 +140,7 @@ export default function Reporting() {
                   <CalendarComponent
                     mode="single"
                     selected={customStartDate}
-                    onSelect={(date) => setCustomStartDate(date ? startOfDay(date) : undefined)}
+                    onSelect={(date) => setCustomStartDate(date ? getISTDayBounds(getISTDateKey(date)).start : undefined)}
                     initialFocus
                   />
                 </PopoverContent>
@@ -150,7 +157,7 @@ export default function Reporting() {
                   <CalendarComponent
                     mode="single"
                     selected={customEndDate}
-                    onSelect={(date) => setCustomEndDate(date ? endOfDay(date) : undefined)}
+                    onSelect={(date) => setCustomEndDate(date ? getISTDayBounds(getISTDateKey(date)).end : undefined)}
                     initialFocus
                   />
                 </PopoverContent>

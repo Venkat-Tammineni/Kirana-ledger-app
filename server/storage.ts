@@ -1274,15 +1274,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; totalDue: number; activeCustomers: number }> {
-    const { start: today } = this.getDayBounds(new Date());
+    const { start: todayStart, end: todayEnd } = this.getDayBounds(new Date());
     
     const salesRes = await db.select({ value: sum(bills.totalAmount) })
       .from(bills)
-      .where(and(eq(bills.status, 'completed'), sql`date >= ${today}`));
+      .where(and(eq(bills.status, 'completed'), sql`${bills.date} >= ${todayStart}`, sql`${bills.date} <= ${todayEnd}`));
 
     const profitRes = await db.select({ value: sum(bills.totalProfit) })
       .from(bills)
-      .where(and(eq(bills.status, 'completed'), sql`date >= ${today}`));
+      .where(and(eq(bills.status, 'completed'), sql`${bills.date} >= ${todayStart}`, sql`${bills.date} <= ${todayEnd}`));
 
     const customerSummaries = await this.getCustomers();
     const customersCount = await db.select({ count: sql<number>`count(*)` }).from(customers);

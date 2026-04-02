@@ -5,12 +5,14 @@ import { relations } from "drizzle-orm";
 import { z } from "zod";
 import { UNIT_OPTIONS } from "./units";
 
+const timestamptz = (name: string) => timestamp(name, { withTimezone: true });
+
 // === Customers ===
 export const customers = pgTable("customers", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   phone: text("phone").notNull(), // Unique constraint could be added but might be annoying for quick POS
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === Products (Item Memory) ===
@@ -32,7 +34,7 @@ export const products = pgTable("products", {
 export const bills = pgTable("bills", {
   id: serial("id").primaryKey(),
   customerId: integer("customer_id").references(() => customers.id),
-  date: timestamp("date").defaultNow(),
+  date: timestamptz("date").defaultNow(),
   subtotalAmount: numeric("subtotal_amount", { precision: 10, scale: 2 }).notNull().default("0"),
   extraChargesTotal: numeric("extra_charges_total", { precision: 10, scale: 2 }).notNull().default("0"),
   totalAmount: numeric("total_amount", { precision: 10, scale: 2 }).notNull(),
@@ -41,7 +43,7 @@ export const bills = pgTable("bills", {
   oldBalancePaidAmount: numeric("old_balance_paid_amount", { precision: 10, scale: 2 }).notNull().default("0"),
   grandTotal: numeric("grand_total", { precision: 10, scale: 2 }).notNull().default("0"),
   totalProfit: numeric("total_profit", { precision: 10, scale: 2 }).default("0"), // Profit = sum((sellingPrice - costPrice) * quantity)
-  lastEditedAt: timestamp("last_edited_at"),
+  lastEditedAt: timestamptz("last_edited_at"),
   lastEditedBy: text("last_edited_by"),
   status: text("status").default("completed"), // completed, voided
 });
@@ -73,14 +75,14 @@ export const billCharges = pgTable("bill_charges", {
 export const quotations = pgTable("quotations", {
   id: serial("id").primaryKey(),
   customerId: integer("customer_id").references(() => customers.id),
-  date: timestamp("date").defaultNow(),
+  date: timestamptz("date").defaultNow(),
   subtotalAmount: numeric("subtotal_amount", { precision: 10, scale: 2 }).notNull().default("0"),
   extraChargesTotal: numeric("extra_charges_total", { precision: 10, scale: 2 }).notNull().default("0"),
   totalAmount: numeric("total_amount", { precision: 10, scale: 2 }).notNull().default("0"),
   notes: text("notes"),
   status: text("status").notNull().default("draft"),
   convertedBillId: integer("converted_bill_id").references(() => bills.id),
-  lastEditedAt: timestamp("last_edited_at"),
+  lastEditedAt: timestamptz("last_edited_at"),
   lastEditedBy: text("last_edited_by"),
 });
 
@@ -113,7 +115,7 @@ export const payments = pgTable("payments", {
   customerId: integer("customer_id").notNull().references(() => customers.id),
   billId: integer("bill_id").references(() => bills.id), // Optional: if payment is for a specific bill
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull(),
-  date: timestamp("date").defaultNow(),
+  date: timestamptz("date").defaultNow(),
   note: text("note"),
 });
 
@@ -123,7 +125,7 @@ export const customerProfitAdjustments = pgTable("customer_profit_adjustments", 
   id: serial("id").primaryKey(),
   customerId: integer("customer_id").notNull().references(() => customers.id),
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull().default("0"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === Ledger Entries (Khatabook-style) ===
@@ -135,7 +137,7 @@ export const ledgerEntries = pgTable("ledger_entries", {
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull(),
   note: text("note"),
   billId: integer("bill_id").references(() => bills.id),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === Stock Adjustments (Inventory History) ===
@@ -147,7 +149,7 @@ export const stockAdjustments = pgTable("stock_adjustments", {
   type: text("type").notNull(), // 'purchase', 'sale', 'adjustment', 'damage', 'return'
   reason: text("reason"), // Optional note explaining the change
   billId: integer("bill_id").references(() => bills.id), // If stock change was from a bill
-  date: timestamp("date").defaultNow(),
+  date: timestamptz("date").defaultNow(),
 });
 
 // === Accounts ===
@@ -155,7 +157,7 @@ export const accounts = pgTable("accounts", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   openingBalance: numeric("opening_balance", { precision: 10, scale: 2 }).default("0"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === Staff ===
@@ -166,17 +168,17 @@ export const staff = pgTable("staff", {
   salaryType: text("salary_type").notNull(), // daily | monthly
   salaryAmount: numeric("salary_amount", { precision: 10, scale: 2 }).notNull().default("0"),
   overallPaymentAdjustment: numeric("overall_payment_adjustment", { precision: 10, scale: 2 }).notNull().default("0"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === Staff Attendance ===
 export const staffAttendance = pgTable("staff_attendance", {
   id: serial("id").primaryKey(),
   staffId: integer("staff_id").notNull().references(() => staff.id),
-  date: timestamp("date").notNull(),
+  date: timestamptz("date").notNull(),
   status: text("status").notNull(), // present | absent
   payment: numeric("payment", { precision: 10, scale: 2 }).notNull().default("0"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === Account Transactions ===
@@ -186,7 +188,7 @@ export const accountTransactions = pgTable("account_transactions", {
   type: text("type").notNull(), // 'spent' | 'credit'
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull(),
   note: text("note"),
-  date: timestamp("date").defaultNow(),
+  date: timestamptz("date").defaultNow(),
 });
 
 // === Manual Investment Entries ===
@@ -195,7 +197,7 @@ export const investmentEntries = pgTable("investment_entries", {
   id: serial("id").primaryKey(),
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull(),
   note: text("note"),
-  date: timestamp("date").defaultNow(),
+  date: timestamptz("date").defaultNow(),
 });
 
 // === RELATIONS ===

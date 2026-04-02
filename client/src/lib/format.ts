@@ -1,4 +1,4 @@
-import { formatIST, toISTDateTimeString } from "@shared/timezone";
+import { formatIST, toISTDateTimeString, getISTParts } from "@shared/timezone";
 
 const inr = new Intl.NumberFormat("en-IN", {
   style: "currency",
@@ -27,8 +27,6 @@ export function toISTDateInputValue(value: string) {
 }
 
 export function toDateInputString(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  const parts = getISTParts(value);
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }

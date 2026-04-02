@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { formatCurrencyINR, formatDate, toDateInputString } from "@/lib/format";
 import { CalendarDays, CheckCircle2, UserPlus, Users, Wallet, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getISTDateKey } from "@shared/timezone";
 
 type StaffDraft = {
   name: string;
@@ -62,10 +63,10 @@ export default function Staff() {
   }, [details]);
 
   const selectedStaff = details?.staff;
-  const selectedDateKey = useMemo(() => toDateInputString(selectedAttendanceDate), [selectedAttendanceDate]);
+  const selectedDateKey = useMemo(() => getISTDateKey(selectedAttendanceDate), [selectedAttendanceDate]);
   const selectedDateLabel = useMemo(() => formatDate(selectedAttendanceDate, "dd MMM yyyy"), [selectedAttendanceDate]);
   const selectedAttendance = useMemo(() => {
-    return details?.attendance.find((entry) => toDateInputString(new Date(entry.date)) === selectedDateKey) || null;
+    return details?.attendance.find((entry) => (entry.date ? getISTDateKey(entry.date) : "") === selectedDateKey) || null;
   }, [details?.attendance, selectedDateKey]);
 
   useEffect(() => {
