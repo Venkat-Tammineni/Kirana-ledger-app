@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useRoute } from "wouter";
 import { ArrowLeft, CalendarIcon, CreditCard, IndianRupee, Plus, Save, Search, ShoppingBag, Trash2 } from "lucide-react";
-import { useBill, useProducts, useUpdateBill } from "@/hooks/use-pos";
+import { useBill, useCreateProduct, useProducts, useUpdateBill } from "@/hooks/use-pos";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -43,6 +43,8 @@ interface ExtraChargeRow {
   label: string;
   amount: string;
 }
+
+const ROUND_OFF_LABEL = "Round Off";
 
 interface PendingProductSelection {
   productId: number;
@@ -110,6 +112,7 @@ export default function BillEdit() {
   const [, setLocation] = useLocation();
   const { data: bill, isLoading } = useBill(billId);
   const { data: products, isLoading: isProductsLoading } = useProducts();
+  const { mutate: createProduct, isPending: isCreatingProduct } = useCreateProduct();
   const { mutate: updateBill, isPending: isSaving } = useUpdateBill();
   const { toast } = useToast();
 
@@ -118,7 +121,7 @@ export default function BillEdit() {
   const [extraCharges, setExtraCharges] = useState<ExtraChargeRow[]>([]);
   const [pendingProduct, setPendingProduct] = useState<PendingProductSelection | null>(null);
   const [isCustomItemOpen, setIsCustomItemOpen] = useState(false);
-  const [customItem, setCustomItem] = useState({ name: "", price: "", quantity: "1", unit: "PCS" as UnitOption });
+  const [customItem, setCustomItem] = useState({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS" as UnitOption, addToProducts: false });
   const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [paidAmount, setPaidAmount] = useState("");
   const [billDate, setBillDate] = useState<Date | undefined>(new Date());
@@ -293,27 +296,81 @@ export default function BillEdit() {
   };
 
   const addCustomItem = () => {
-    if (!customItem.name.trim() || !customItem.price) return;
+    const trimmedName = customItem.name.trim();
+    const price = Number(customItem.price);
+    const costPrice = Number(customItem.costPrice);
+    const quantity = Number(customItem.quantity || 1);
 
-    setCart((prev) => [
-      ...prev,
-      {
-        tempId: crypto.randomUUID(),
-        name: customItem.name.trim(),
-        price: Number(customItem.price),
-        basePrice: Number(customItem.price),
-        costPrice: 0,
-        baseCostPrice: 0,
-        quantity: Number(customItem.quantity || 1),
-        unit: customItem.unit,
-        primaryUnit: customItem.unit,
-        secondaryUnit: null,
-        unitConversion: null,
-      },
-    ]);
+    if (!trimmedName) {
+      toast({ title: "Item name required", description: "Enter a custom item name.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      toast({ title: "Invalid price", description: "Enter a valid custom item price.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(costPrice) || costPrice < 0) {
+      toast({ title: "Invalid cost price", description: "Enter a valid custom item cost price.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      toast({ title: "Invalid quantity", description: "Quantity must be greater than zero.", variant: "destructive" });
+      return;
+    }
 
-    setCustomItem({ name: "", price: "", quantity: "1", unit: "PCS" });
-    setIsCustomItemOpen(false);
+    const appendCustomItem = (productId?: number) => {
+      setCart((prev) => [
+        ...prev,
+        {
+          tempId: crypto.randomUUID(),
+          productId,
+          name: trimmedName,
+          price,
+          basePrice: price,
+          costPrice,
+          baseCostPrice: costPrice,
+          quantity,
+          unit: customItem.unit,
+          primaryUnit: customItem.unit,
+          secondaryUnit: null,
+          unitConversion: null,
+        },
+      ]);
+
+      setCustomItem({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS", addToProducts: false });
+      setIsCustomItemOpen(false);
+    };
+
+    if (customItem.addToProducts) {
+      createProduct(
+        {
+          name: trimmedName,
+          price,
+          costPrice,
+          primaryUnit: customItem.unit,
+          secondaryUnit: null,
+          unitConversion: null,
+          stock: 0,
+          lowStockThreshold: 10,
+        },
+        {
+          onSuccess: (product) => {
+            toast({ title: "Product added", description: `${trimmedName} was added to products.` });
+            appendCustomItem(product.id);
+          },
+          onError: (error) => {
+            toast({
+              title: "Could not add product",
+              description: error instanceof Error ? error.message : "Please try again.",
+              variant: "destructive",
+            });
+          },
+        },
+      );
+      return;
+    }
+
+    appendCustomItem();
   };
 
   const setQuantity = (tempId: string, quantity: number) => {
@@ -402,11 +459,58 @@ export default function BillEdit() {
       label: charge.label.trim(),
       amountNumber: Number(charge.amount || 0),
     }))
-    .filter((charge) => charge.label && charge.amountNumber >= 0);
+    .filter((charge) => charge.label && Number.isFinite(charge.amountNumber));
+  const nonRoundOffCharges = normalizedExtraCharges.filter(
+    (charge) => charge.label.toLowerCase() !== ROUND_OFF_LABEL.toLowerCase(),
+  );
+  const baseExtraChargesTotal = nonRoundOffCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
+  const baseBillTotal = cartTotal + baseExtraChargesTotal;
   const extraChargesTotal = normalizedExtraCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
   const billTotal = cartTotal + extraChargesTotal;
   const oldBalance = Math.max(0, Number(bill?.oldBalanceAmount || 0));
+  const baseGrandTotal = baseBillTotal + oldBalance;
   const grandTotal = billTotal + oldBalance;
+
+  const applyRoundOff = () => {
+    const roundedTotal = Math.round(baseGrandTotal);
+    const roundOffAmount = Number((roundedTotal - baseGrandTotal).toFixed(2));
+
+    if (Math.abs(roundOffAmount) < 0.01) {
+      setExtraCharges((prev) =>
+        prev.filter((charge) => charge.label.trim().toLowerCase() !== ROUND_OFF_LABEL.toLowerCase()),
+      );
+      toast({ title: "Already rounded", description: "Grand total is already a round figure." });
+      return;
+    }
+
+    setExtraCharges((prev) => {
+      const existingIndex = prev.findIndex(
+        (charge) => charge.label.trim().toLowerCase() === ROUND_OFF_LABEL.toLowerCase(),
+      );
+
+      if (existingIndex >= 0) {
+        return prev.map((charge, index) =>
+          index === existingIndex
+            ? { ...charge, label: ROUND_OFF_LABEL, amount: roundOffAmount.toFixed(2) }
+            : charge,
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          label: ROUND_OFF_LABEL,
+          amount: roundOffAmount.toFixed(2),
+        },
+      ];
+    });
+
+    toast({
+      title: "Round off applied",
+      description: `Grand total rounded to ${formatCurrencyINR(roundedTotal)}.`,
+    });
+  };
 
   const openReview = () => {
     if (cart.length === 0) {
@@ -616,7 +720,6 @@ export default function BillEdit() {
                 />
                 <Input
                   type="number"
-                  min="0"
                   step="0.01"
                   placeholder="0.00"
                   value={charge.amount}
@@ -636,9 +739,14 @@ export default function BillEdit() {
               </div>
             ))}
 
-            <Button type="button" variant="ghost" className="h-9 px-0 text-primary" onClick={addExtraChargeRow}>
-              <Plus className="w-4 h-4 mr-2" /> Add Extra Charge
-            </Button>
+            <div className="flex items-center gap-3">
+              <Button type="button" variant="ghost" className="h-9 px-0 text-primary" onClick={addExtraChargeRow}>
+                <Plus className="w-4 h-4 mr-2" /> Add Extra Charge
+              </Button>
+              <Button type="button" variant="ghost" className="h-9 px-0 text-primary" onClick={applyRoundOff}>
+                Round Off
+              </Button>
+            </div>
 
             <div className="space-y-2 rounded-xl border border-border bg-muted/30 p-3 text-sm">
               <div className="flex justify-between">
@@ -688,6 +796,14 @@ export default function BillEdit() {
                         value={customItem.price}
                         onChange={(e) => setCustomItem({ ...customItem, price: e.target.value })}
                       />
+                      <Input
+                        type="number"
+                        placeholder="Cost Price"
+                        value={customItem.costPrice}
+                        onChange={(e) => setCustomItem({ ...customItem, costPrice: e.target.value })}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
                       <select
                         className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                         value={customItem.unit}
@@ -699,16 +815,26 @@ export default function BillEdit() {
                           </option>
                         ))}
                       </select>
+                      <Input
+                        type="number"
+                        placeholder="Qty"
+                        value={customItem.quantity}
+                        onChange={(e) => setCustomItem({ ...customItem, quantity: e.target.value })}
+                      />
                     </div>
-                    <Input
-                      type="number"
-                      placeholder="Qty"
-                      value={customItem.quantity}
-                      onChange={(e) => setCustomItem({ ...customItem, quantity: e.target.value })}
-                    />
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={customItem.addToProducts}
+                        onChange={(e) => setCustomItem({ ...customItem, addToProducts: e.target.checked })}
+                      />
+                      Add this custom item to products also
+                    </label>
                   </div>
                   <DialogFooter>
-                    <Button type="submit">Add to Bill</Button>
+                    <Button type="submit" disabled={isCreatingProduct}>
+                      {isCreatingProduct ? "Adding..." : "Add to Bill"}
+                    </Button>
                   </DialogFooter>
                 </form>
               </DialogContent>

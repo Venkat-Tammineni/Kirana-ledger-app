@@ -168,7 +168,7 @@ export async function registerRoutes(
     try {
       const id = Number(req.params.id);
       const input = api.accounts.credit.input.parse(req.body);
-      const txn = await storage.addToAccount(id, input.amount, input.note);
+      const txn = await storage.addToAccount(id, input.amount, input.note, input.customerId);
       res.status(201).json(txn);
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -188,6 +188,7 @@ export async function registerRoutes(
         amount: input.amount,
         note: input.note,
         date: input.date ? parseISTDateTime(input.date) : undefined,
+        purchases: input.purchases,
       });
       res.status(201).json({
         id: entry.id,
@@ -312,6 +313,7 @@ export async function registerRoutes(
         note: input.note || "Manual repayment",
         billId: null,
         date: input.date ? parseISTDateTime(input.date) : undefined,
+        paymentAccountId: input.paymentAccountId,
       });
       res.status(201).json(payment);
     } catch (err) {
@@ -417,8 +419,6 @@ export async function registerRoutes(
   
   app.post(api.products.create.path, async (req, res) => {
     try {
-      console.log("POST /products body:", req.body);
-  
       const input = api.products.create.input.parse(req.body);
 
       // `insertProductSchema` can yield optional fields when the DB has defaults.
@@ -447,6 +447,10 @@ export async function registerRoutes(
             .map(e => `${e.path.join(".")} ${e.message}`)
             .join(", ")
         });
+      }
+
+      if (err instanceof Error && err.message === "A product with this name already exists") {
+        return res.status(400).json({ message: err.message });
       }
   
       const message = err instanceof Error ? err.message : String(err);
@@ -478,6 +482,77 @@ export async function registerRoutes(
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
+      } else if (err instanceof Error) {
+        const status = err.message === "Product not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.patch(api.customers.updateDailyProfit.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const customer = await storage.getCustomer(id);
+      if (!customer) return res.status(404).json({ message: "Customer not found" });
+      const input = api.customers.updateDailyProfit.input.parse(req.body);
+      const result = await storage.setCustomerDailyProfit(id, parseISTDateTime(input.profitDate), input.totalProfit);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else if (err instanceof Error) {
+        res.status(400).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.delete(api.customers.deleteCredit.path, async (req, res) => {
+    try {
+      const customerId = Number(req.params.id);
+      const entryId = Number(req.params.entryId);
+      await storage.deleteCustomerCredit(customerId, entryId);
+      res.status(204).send();
+    } catch (err) {
+      if (err instanceof Error) {
+        const status = err.message === "Credit entry not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.delete(api.customers.deleteRepayment.path, async (req, res) => {
+    try {
+      const customerId = Number(req.params.id);
+      const paymentId = Number(req.params.paymentId);
+      await storage.deleteCustomerPayment(customerId, paymentId);
+      res.status(204).send();
+    } catch (err) {
+      if (err instanceof Error) {
+        const status = err.message === "Payment not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.delete(api.accounts.deleteTransaction.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const transactionId = Number(req.params.transactionId);
+      await storage.deleteAccountTransaction(id, transactionId);
+      res.status(204).send();
+    } catch (err) {
+      if (err instanceof Error) {
+        const status =
+          err.message === "Account not found" || err.message === "Transaction not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
       } else {
         res.status(500).json({ message: "Internal server error" });
       }
@@ -489,8 +564,13 @@ export async function registerRoutes(
       const id = Number(req.params.id);
       await storage.deleteProduct(id);
       res.status(204).send();
-    } catch (err: any) {
-      res.status(400).json({ message: err.message });
+    } catch (err) {
+      if (err instanceof Error) {
+        const status = err.message === "Product not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
     }
   });
 
@@ -498,6 +578,23 @@ export async function registerRoutes(
   app.get(api.bills.list.path, async (req, res) => {
     const bills = await storage.getBills();
     res.json(bills);
+  });
+
+  app.get(api.bills.itemMemory.path, async (req, res) => {
+    try {
+      const input = api.bills.itemMemory.input.parse(req.query);
+      const itemMemory = await storage.getLastBilledItemMemory(input.customerId, {
+        productId: input.productId,
+        name: input.name,
+      });
+      res.json(itemMemory);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
   });
 
   app.get(api.bills.get.path, async (req, res) => {
@@ -541,8 +638,17 @@ export async function registerRoutes(
   });
   
   app.delete(api.bills.delete.path, async (req, res) => {
-    await storage.deleteBill(Number(req.params.id));
-    res.status(204).send();
+    try {
+      await storage.deleteBill(Number(req.params.id));
+      res.status(204).send();
+    } catch (err) {
+      if (err instanceof Error) {
+        const status = err.message === "Bill not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
   });
 
   // === Quotations ===

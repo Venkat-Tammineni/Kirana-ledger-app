@@ -1,22 +1,34 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, buildUrl } from "@shared/routes";
+import { useBills } from "@/hooks/use-pos";
 import { BarChart3, TrendingUp, TrendingDown, DollarSign, Users, Calendar, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCurrencyINR, formatDate, toDateInputString } from "@/lib/format";
-import { getISTDateKey, getISTDayBounds, getISTMonthBounds, parseISTDateTime } from "@shared/timezone";
+import { formatCurrencyINR, formatDate, formatDateTime, toDateInputString } from "@/lib/format";
+import { getISTDateKey, getISTDayBounds, getISTMonthBounds } from "@shared/timezone";
 
 type DateRange = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 export default function Reporting() {
   const todayBounds = getISTDayBounds(new Date());
+  const searchParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const initialRange = searchParams?.get("range");
 
-  const [dateRange, setDateRange] = useState<DateRange>('daily');
+  const [dateRange, setDateRange] = useState<DateRange>(
+    initialRange === "weekly" || initialRange === "monthly" || initialRange === "custom" ? initialRange : "daily",
+  );
   const [customStartDate, setCustomStartDate] = useState<Date | undefined>(todayBounds.start);
   const [customEndDate, setCustomEndDate] = useState<Date | undefined>(todayBounds.end);
+  const { data: bills, isLoading: billsLoading } = useBills();
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const nextUrl = `${window.location.pathname}?range=${dateRange}${window.location.hash}`;
+    window.history.replaceState({}, "", nextUrl);
+  }, [dateRange]);
 
   const getDateRange = () => {
     const today = new Date();
@@ -77,6 +89,14 @@ export default function Reporting() {
       return api.reporting.customerProfit.responses[200].parse(await res.json());
     },
   });
+
+  const filteredBills = useMemo(() => {
+    return (bills || []).filter((bill) => {
+      if (!bill.date) return false;
+      const billDate = new Date(bill.date);
+      return billDate >= start && billDate <= end;
+    });
+  }, [bills, end, start]);
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8">
@@ -172,7 +192,7 @@ export default function Reporting() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
         <div className="bg-card p-6 rounded-xl border border-border shadow-sm">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm text-muted-foreground">Total Sales</span>
@@ -214,6 +234,56 @@ export default function Reporting() {
             </div>
           )}
         </div>
+
+        <div className="bg-card p-6 rounded-xl border border-border shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm text-muted-foreground">Mirchi Powder Sales</span>
+            <DollarSign className="w-5 h-5 text-amber-500" />
+          </div>
+          {profitLoading ? (
+            <Skeleton className="h-8 w-32" />
+          ) : (
+            <div className="text-3xl font-bold font-display text-amber-600">
+              {formatCurrencyINR(profitReport?.mirchiPowderSales || 0)}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-card p-6 rounded-xl border border-border shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm text-muted-foreground">Mirchi Powder Profit</span>
+            <TrendingUp className="w-5 h-5 text-rose-500" />
+          </div>
+          {profitLoading ? (
+            <Skeleton className="h-8 w-32" />
+          ) : (
+            <div className="text-3xl font-bold font-display text-rose-600">
+              {formatCurrencyINR(profitReport?.mirchiPowderProfit || 0)}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-card p-6 rounded-xl border border-border shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm text-muted-foreground">Mirchi Powder Investment</span>
+            <TrendingDown className="w-5 h-5 text-red-500" />
+          </div>
+          {profitLoading ? (
+            <Skeleton className="h-8 w-32" />
+          ) : (
+            <div className="text-3xl font-bold font-display text-red-600">
+              {formatCurrencyINR(profitReport?.mirchiPowderInvestment || 0)}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-card p-6 rounded-xl border border-border shadow-sm mb-8">
+        <h2 className="text-lg font-bold mb-2">Mirchi Powder Handling</h2>
+        <p className="text-sm text-muted-foreground">
+          The main sales, profit, and investment totals on this page exclude only the item named <span className="font-semibold text-foreground">Mirchi Powder</span>.
+          Its sales and profit are shown separately in the cards above.
+        </p>
       </div>
 
       {/* Profit Margin */}
@@ -236,8 +306,46 @@ export default function Reporting() {
         </div>
       )}
 
-      {/* Customer-wise Profit */}
-      <div className="bg-card p-6 rounded-xl border border-border shadow-sm">
+      <div id="sales-breakdown" className="bg-card p-6 rounded-xl border border-border shadow-sm mb-8 scroll-mt-24">
+        <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+          <DollarSign className="w-5 h-5 text-primary" />
+          Sales Breakdown
+        </h2>
+        {billsLoading ? (
+          <div className="space-y-3">
+            {[1,2,3,4,5].map(i => <Skeleton key={i} className="h-14 rounded-lg" />)}
+          </div>
+        ) : filteredBills.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-muted text-muted-foreground uppercase text-xs">
+                <tr>
+                  <th className="px-4 py-3 font-semibold">Bill</th>
+                  <th className="px-4 py-3 font-semibold">Date</th>
+                  <th className="px-4 py-3 font-semibold">Customer</th>
+                  <th className="px-4 py-3 font-semibold text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {filteredBills.map((bill) => (
+                  <tr key={bill.id} className="hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-3 font-mono">#{bill.id}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{bill.date ? formatDateTime(bill.date, "dd MMM yyyy, hh:mm a") : "-"}</td>
+                    <td className="px-4 py-3">{bill.customerName || "Walk-in Customer"}</td>
+                    <td className="px-4 py-3 text-right font-mono font-semibold">{formatCurrencyINR(Number(bill.totalAmount || 0))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-muted-foreground text-sm">
+            No sales found for the selected date range.
+          </div>
+        )}
+      </div>
+
+      <div id="profit-breakdown" className="bg-card p-6 rounded-xl border border-border shadow-sm scroll-mt-24">
         <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
           <Users className="w-5 h-5 text-primary" />
           Customer-wise Profit Analysis
@@ -273,6 +381,44 @@ export default function Reporting() {
         ) : (
           <div className="text-center py-8 text-muted-foreground text-sm">
             No sales data available for the selected date range.
+          </div>
+        )}
+      </div>
+
+      <div className="bg-card p-6 rounded-xl border border-border shadow-sm mt-8">
+        <h2 className="text-xl font-bold mb-4">Mirchi Powder Customer Quantity</h2>
+        {profitLoading ? (
+          <div className="space-y-3">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-14 rounded-lg" />)}
+          </div>
+        ) : profitReport?.mirchiPowderCustomers && profitReport.mirchiPowderCustomers.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-muted text-muted-foreground uppercase text-xs">
+                <tr>
+                  <th className="px-4 py-3 font-semibold">Customer</th>
+                  <th className="px-4 py-3 font-semibold text-right">Quantity</th>
+                  <th className="px-4 py-3 font-semibold text-right">Sales</th>
+                  <th className="px-4 py-3 font-semibold text-right">Profit</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {profitReport.mirchiPowderCustomers.map((customer, index) => (
+                  <tr key={`${customer.customerId ?? "walk-in"}-${customer.unit}-${index}`} className="hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-3 font-medium">{customer.customerName}</td>
+                    <td className="px-4 py-3 text-right font-mono font-semibold">
+                      {customer.totalQuantity} {customer.unit}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono">{formatCurrencyINR(customer.totalSales)}</td>
+                    <td className="px-4 py-3 text-right font-mono text-green-600">{formatCurrencyINR(customer.totalProfit)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-muted-foreground text-sm">
+            No Mirchi Powder sales found for the selected date range.
           </div>
         )}
       </div>

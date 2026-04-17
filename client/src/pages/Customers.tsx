@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useCustomers, useCreateCustomer, useUpdateCustomer, useDeleteCustomer } from "@/hooks/use-pos";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
@@ -11,8 +11,10 @@ import { customerFormSchema } from "@/lib/form-schemas";
 import { CustomerFormFields } from "@/components/forms/CustomerFormFields";
 import { useToast } from "@/hooks/use-toast";
 import { formatCurrencyINR } from "@/lib/format";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 
 export default function Customers() {
+  const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
   const [showPendingOnly, setShowPendingOnly] = useState(false);
   const { data: customers, isLoading } = useCustomers(search);
@@ -82,7 +84,25 @@ export default function Customers() {
     );
   };
 
+  const customerVoiceCommands = [
+    {
+      label: "Open customer",
+      examples: ["open pulav", "open famous"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^open\s+(.+)$/);
+        if (!match) return null;
+        const matches = (customers || []).filter((customer) =>
+          customer.name.toLowerCase().includes(match[1].trim()),
+        );
+        if (matches.length !== 1) return `I could not uniquely match ${match[1].trim()}. Please search once manually.`;
+        setLocation(`/customers/${matches[0].id}`);
+        return `Opening ${matches[0].name}.`;
+      },
+    },
+  ];
+
   return (
+    <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
         <div>
@@ -323,5 +343,11 @@ export default function Customers() {
         </div>
       )}
     </div>
+      <VoiceAssistant
+        title="Customers Voice Helper"
+        subtitle="Open a customer by voice."
+        commands={customerVoiceCommands}
+      />
+    </>
   );
 }

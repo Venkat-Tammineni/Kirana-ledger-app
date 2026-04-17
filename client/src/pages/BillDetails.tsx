@@ -1,10 +1,22 @@
-import { useBill } from "@/hooks/use-pos";
+import { useBill, useDeleteBill } from "@/hooks/use-pos";
 import { useRoute } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Link } from "wouter";
-import { ArrowLeft, Download, Pencil, Printer } from "lucide-react";
+import { Link, useLocation } from "wouter";
+import { ArrowLeft, Download, Pencil, Printer, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
+import { useState } from "react";
+import { useToast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 function escapePdfText(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
@@ -31,6 +43,16 @@ export default function BillDetails() {
   const [, params] = useRoute("/bills/:id");
   const id = Number(params?.id);
   const { data: bill, isLoading } = useBill(id);
+  const { mutate: deleteBill, isPending: isDeleting } = useDeleteBill();
+  const { toast } = useToast();
+  const [, setLocation] = useLocation();
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const totalPaidForBill = bill
+    ? Number(bill.billPaidAmount || 0) + Number(bill.oldBalancePaidAmount || 0)
+    : 0;
+  const remainingPendingBalance = bill
+    ? Math.max(0, Number(bill.grandTotal || bill.totalAmount || 0) - totalPaidForBill)
+    : 0;
   const summaryRows = bill
     ? [
         { label: "This Bill Total", amount: Number(bill.subtotalAmount || bill.totalAmount || 0), emphasis: false },
@@ -43,7 +65,9 @@ export default function BillDetails() {
           ? [{ label: "Bill Total", amount: Number(bill.totalAmount || 0), emphasis: false }]
           : []),
         { label: "Old Balance", amount: Number(bill.oldBalanceAmount || 0), emphasis: false },
-        { label: "Grand Total", amount: Number(bill.grandTotal || bill.totalAmount || 0), emphasis: true },
+        { label: "Grand Total", amount: Number(bill.grandTotal || bill.totalAmount || 0), emphasis: false },
+        { label: "Paid Amount", amount: totalPaidForBill, emphasis: false },
+        { label: "Pending Balance", amount: remainingPendingBalance, emphasis: true },
       ]
     : [];
 
@@ -578,6 +602,16 @@ export default function BillDetails() {
                 </Button>
               </Link>
             )}
+            {bill.status === "completed" && (
+              <Button
+                variant="outline"
+                onClick={() => setConfirmDeleteOpen(true)}
+                className="bill-action-btn h-9 px-4 rounded-lg border-stone-300 text-destructive hover:text-white hover:bg-destructive hover:border-destructive"
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-2" />
+                Delete
+              </Button>
+            )}
             <Button variant="outline" onClick={handleDownload} className="bill-action-btn h-9 px-4 rounded-lg border-stone-300">
               <Download className="w-3.5 h-3.5 mr-2" />
               Download
@@ -593,7 +627,7 @@ export default function BillDetails() {
         <div className="bill-paper rounded-2xl px-8 pt-10 pb-10 md:px-12">
 
           {/* Watermark */}
-          <div className="bill-watermark">PAID</div>
+          <div className="bill-watermark">{remainingPendingBalance > 0 ? "DUE" : "PAID"}</div>
 
           <div className="bill-content">
 
@@ -763,6 +797,43 @@ export default function BillDetails() {
           </div>
         </div>
       </div>
+      <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete bill #{bill.id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will remove the bill effects and restore customer balance, stock, sales, and profit to the previous values.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep Bill</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                deleteBill(bill.id, {
+                  onSuccess: () => {
+                    toast({
+                      title: "Bill deleted",
+                      description: `Bill #${bill.id} was reversed successfully.`,
+                    });
+                    setConfirmDeleteOpen(false);
+                    setLocation("/bills");
+                  },
+                  onError: (error: Error) => {
+                    toast({
+                      title: "Delete failed",
+                      description: error.message,
+                      variant: "destructive",
+                    });
+                  },
+                });
+              }}
+              disabled={isDeleting}
+            >
+              {isDeleting ? "Deleting..." : "Delete Bill"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

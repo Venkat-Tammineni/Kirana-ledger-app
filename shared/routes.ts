@@ -21,6 +21,7 @@ const createBillSchema = z.object({
   customerId: z.number().optional(),
   customerName: z.string().optional(),
   customerPhone: z.string().optional(),
+  paymentAccountId: z.number().optional(),
   items: z.array(z.object({
     productId: z.number().optional(),
     name: z.string(),
@@ -33,7 +34,7 @@ const createBillSchema = z.object({
   })).min(1, "Bill must have at least one item"),
   extraCharges: z.array(z.object({
     label: z.string().trim().min(1, "Charge name is required"),
-    amount: z.number().min(0),
+    amount: z.number(),
   })).default([]),
   paidAmount: z.number().min(0).default(0),
   date: z.string().optional(),
@@ -41,6 +42,7 @@ const createBillSchema = z.object({
 
 const updateBillSchema = z.object({
   customerId: z.number().optional(),
+  paymentAccountId: z.number().optional(),
   items: z.array(z.object({
     productId: z.number().optional(),
     name: z.string(),
@@ -53,11 +55,30 @@ const updateBillSchema = z.object({
   })).min(1, "Bill must have at least one item"),
   extraCharges: z.array(z.object({
     label: z.string().trim().min(1, "Charge name is required"),
-    amount: z.number().min(0),
+    amount: z.number(),
   })).default([]),
   editedBy: z.string().trim().min(1).max(80).optional(),
   paidAmount: z.number().min(0).default(0),
   date: z.string().optional(),
+});
+
+const billItemMemoryQuerySchema = z.object({
+  customerId: z.coerce.number(),
+  productId: z.coerce.number().optional(),
+  name: z.string().trim().min(1).optional(),
+}).refine((value) => value.productId !== undefined || value.name !== undefined, {
+  message: "productId or name is required",
+});
+
+const billItemMemoryResponseSchema = z.object({
+  productId: z.number().nullable(),
+  name: z.string(),
+  quantity: z.number(),
+  unit: z.enum(UNIT_OPTIONS),
+  price: z.number(),
+  costPrice: z.number(),
+  billId: z.number(),
+  billDate: z.string(),
 });
 
 const createQuotationSchema = z.object({
@@ -92,6 +113,7 @@ const createRepaymentSchema = z.object({
   amount: z.number().min(0.01, "Amount must be greater than zero"),
   note: z.string().optional(),
   date: z.string().optional(),
+  paymentAccountId: z.number().optional(),
 });
 
 const createLedgerCreditSchema = z.object({
@@ -101,6 +123,11 @@ const createLedgerCreditSchema = z.object({
 });
 
 const updateCustomerProfitSchema = z.object({
+  totalProfit: z.number(),
+});
+
+const updateCustomerDailyProfitSchema = z.object({
+  profitDate: z.string(),
   totalProfit: z.number(),
 });
 
@@ -123,6 +150,15 @@ const createInvestmentEntrySchema = z.object({
   amount: z.number().min(0.01, "Amount must be greater than zero"),
   note: z.string().min(1, "Note is required"),
   date: z.string().optional(),
+  purchases: z
+    .array(
+      z.object({
+        productId: z.number(),
+        quantity: z.number().min(1, "Quantity must be greater than zero"),
+        costPrice: z.number().min(0, "Rate cannot be negative").optional(),
+      }),
+    )
+    .default([]),
 });
 
 const investmentHistoryEntrySchema = z.object({
@@ -426,10 +462,20 @@ export const api = {
       input: z.object({
         amount: z.number().min(0.01),
         note: z.string().min(1, "Note is required"),
+        customerId: z.number().optional(),
       }),
       responses: {
         201: z.custom<typeof accountTransactions.$inferSelect>(),
         400: errorSchemas.validation,
+      },
+    },
+    deleteTransaction: {
+      method: 'DELETE' as const,
+      path: '/api/accounts/:id/transactions/:transactionId',
+      responses: {
+        204: z.void(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
       },
     },
     addInvestment: {
@@ -544,6 +590,15 @@ export const api = {
         404: errorSchemas.notFound,
       },
     },
+    deleteRepayment: {
+      method: 'DELETE' as const,
+      path: '/api/customers/:id/repay/:paymentId',
+      responses: {
+        204: z.void(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
     addCredit: {
       method: 'POST' as const,
       path: '/api/customers/:id/ledger/credit',
@@ -556,6 +611,15 @@ export const api = {
         404: errorSchemas.notFound,
       },
     },
+    deleteCredit: {
+      method: 'DELETE' as const,
+      path: '/api/customers/:id/ledger/:entryId',
+      responses: {
+        204: z.void(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
     updateProfit: {
       method: 'PATCH' as const,
       path: '/api/customers/:id/profit',
@@ -563,6 +627,21 @@ export const api = {
       responses: {
         200: z.object({
           customerId: z.number(),
+          totalProfit: z.number(),
+          adjustment: z.number(),
+        }),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
+    updateDailyProfit: {
+      method: 'PATCH' as const,
+      path: '/api/customers/:id/profit/day',
+      input: updateCustomerDailyProfitSchema,
+      responses: {
+        200: z.object({
+          customerId: z.number(),
+          profitDate: z.string(),
           totalProfit: z.number(),
           adjustment: z.number(),
         }),
@@ -638,6 +717,15 @@ export const api = {
         404: errorSchemas.notFound,
       },
     },
+    itemMemory: {
+      method: 'GET' as const,
+      path: '/api/bills/item-memory',
+      input: billItemMemoryQuerySchema,
+      responses: {
+        200: billItemMemoryResponseSchema.nullable(),
+        400: errorSchemas.validation,
+      },
+    },
     create: {
       method: 'POST' as const,
       path: '/api/bills',
@@ -662,6 +750,7 @@ export const api = {
       path: '/api/bills/:id',
       responses: {
         204: z.void(),
+        400: errorSchemas.validation,
         404: errorSchemas.notFound,
       },
     }
@@ -737,6 +826,8 @@ export const api = {
           200: z.object({
             todaySales: z.number(),
             todayProfit: z.number(),
+            mirchiPowderSales: z.number(),
+            mirchiPowderProfit: z.number(),
             totalDue: z.number(),
             activeCustomers: z.number(),
           }),
@@ -856,6 +947,17 @@ export const api = {
           totalSales: z.number(),
           totalProfit: z.number(),
           totalInvestment: z.number(),
+          mirchiPowderSales: z.number(),
+          mirchiPowderProfit: z.number(),
+          mirchiPowderInvestment: z.number(),
+          mirchiPowderCustomers: z.array(z.object({
+            customerId: z.number().nullable(),
+            customerName: z.string(),
+            totalQuantity: z.number(),
+            unit: z.string(),
+            totalSales: z.number(),
+            totalProfit: z.number(),
+          })),
         }),
       },
     },

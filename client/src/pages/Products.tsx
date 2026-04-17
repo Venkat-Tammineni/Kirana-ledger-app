@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useProducts, useCreateProduct, useUpdateProduct, useDeleteProduct } from "@/hooks/use-pos";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Search, Plus, Package, Pencil, Trash2, AlertTriangle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { cn } from "@/lib/utils";
 import { ProductFormFields, type ProductDraft } from "@/components/forms/ProductFormFields";
 import { productFormSchema } from "@/lib/form-schemas";
@@ -12,12 +13,15 @@ import { useToast } from "@/hooks/use-toast";
 import { formatCurrencyINR } from "@/lib/format";
 import {
   deriveUnitPriceFromBase,
+  fromBaseQuantity,
   getBaseUnit,
   getDefaultSalesUnit,
   getPrimaryUnit,
   hasSecondaryUnit,
   normalizeUnitPriceToBase,
+  toBaseQuantity,
 } from "@shared/units";
+import { parseCreateProductVoiceCommand } from "@/lib/voice-commands";
 
 const defaultDraft: ProductDraft = {
   name: "",
@@ -31,6 +35,7 @@ const defaultDraft: ProductDraft = {
   unitConversion: "",
   sku: "",
   stock: "",
+  stockInputUnit: "PCS",
   lowStockThreshold: "10",
 };
 
@@ -46,6 +51,57 @@ export default function Products() {
   const [isEditOpen, setIsEditOpen] = useState(false);
   const { toast } = useToast();
 
+  const productVoiceCommands = useMemo(
+    () => [
+      {
+        label: "Search products",
+        examples: ["search coco", "find besan"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^(search|find)\s+(.+)$/);
+          if (!match) return null;
+          setSearch(match[2].trim());
+          return `Searching for ${match[2].trim()}.`;
+        },
+      },
+      {
+        label: "Create product",
+        examples: ["add product coco selling price 23 cost price 21 pieces"],
+        run: ({ raw }: { raw: string; normalized: string }) => {
+          const parsed = parseCreateProductVoiceCommand(raw);
+          if (!parsed) return null;
+
+          createProduct(
+            {
+              name: parsed.name,
+              price: parsed.sellingPrice,
+              costPrice: parsed.costPrice,
+              primaryUnit: parsed.unit,
+              secondaryUnit: null,
+              unitConversion: null,
+              stock: 0,
+              lowStockThreshold: 10,
+            },
+            {
+              onSuccess: () => {
+                toast({ title: "Product added", description: `${parsed.name} was created.` });
+              },
+              onError: (error) => {
+                toast({
+                  title: "Could not add product",
+                  description: error instanceof Error ? error.message : "Please try again.",
+                  variant: "destructive",
+                });
+              },
+            },
+          );
+
+          return `Creating product ${parsed.name}.`;
+        },
+      },
+    ],
+    [createProduct, toast],
+  );
+
   const normalizeDraft = (draft: ProductDraft) => {
     const unitConfig = {
       primaryUnit: draft.primaryUnit,
@@ -54,15 +110,15 @@ export default function Products() {
     };
 
     return {
-      name: draft.name,
+      name: draft.name.trim(),
       price: normalizeUnitPriceToBase(Number(draft.price || 0), unitConfig, draft.priceInputUnit),
       costPrice: normalizeUnitPriceToBase(Number(draft.costPrice || 0), unitConfig, draft.costPriceInputUnit),
       primaryUnit: draft.primaryUnit,
       secondaryUnit: draft.hasSecondaryUnit ? draft.secondaryUnit : null,
       unitConversion: draft.hasSecondaryUnit ? Number(draft.unitConversion || 0) : null,
-      sku: draft.sku,
-      stock: Number(draft.stock || 0),
-      lowStockThreshold: Number(draft.lowStockThreshold || 10),
+      sku: draft.sku.trim(),
+      stock: toBaseQuantity(Number(draft.stock || 0), unitConfig, draft.stockInputUnit),
+      lowStockThreshold: toBaseQuantity(Number(draft.lowStockThreshold || 10), unitConfig, draft.stockInputUnit),
     };
   };
 
@@ -75,8 +131,16 @@ export default function Products() {
 
     createProduct(parsed.data, {
       onSuccess: () => {
+        toast({ title: "Product added", description: "The new product has been saved." });
         setIsOpen(false);
         setNewProduct(defaultDraft);
+      },
+      onError: (error) => {
+        toast({
+          title: "Could not add product",
+          description: error instanceof Error ? error.message : "Please try again.",
+          variant: "destructive",
+        });
       },
     });
   };
@@ -97,14 +161,23 @@ export default function Products() {
       },
       {
         onSuccess: () => {
+          toast({ title: "Product updated", description: "Selling and cost price changes were saved." });
           setIsEditOpen(false);
           setEditingProduct(null);
+        },
+        onError: (error) => {
+          toast({
+            title: "Could not update product",
+            description: error instanceof Error ? error.message : "Please try again.",
+            variant: "destructive",
+          });
         },
       },
     );
   };
 
   return (
+    <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
         <div>
@@ -117,18 +190,21 @@ export default function Products() {
               <Plus className="w-4 h-4 mr-2" /> Add Product
             </Button>
           </DialogTrigger>
-          <DialogContent>
+          <DialogContent className="max-h-[92vh] overflow-hidden p-0 sm:max-w-5xl">
             <form
+              className="flex max-h-[92vh] flex-col"
               onSubmit={(e) => {
                 e.preventDefault();
                 handleCreate();
               }}
             >
-              <DialogHeader>
+              <DialogHeader className="border-b border-border px-4 py-3">
                 <DialogTitle>Add New Product</DialogTitle>
               </DialogHeader>
-              <ProductFormFields value={newProduct} onChange={setNewProduct} />
-              <DialogFooter>
+              <div className="flex-1 overflow-y-auto px-4">
+                <ProductFormFields value={newProduct} onChange={setNewProduct} />
+              </div>
+              <DialogFooter className="border-t border-border px-4 py-3">
                 <Button type="submit" disabled={isPending || !newProduct.name}>
                   {isPending ? "Adding..." : "Add Product"}
                 </Button>
@@ -144,20 +220,23 @@ export default function Products() {
             if (!open) setEditingProduct(null);
           }}
         >
-          <DialogContent>
+          <DialogContent className="max-h-[92vh] overflow-hidden p-0 sm:max-w-5xl">
             <form
+              className="flex max-h-[92vh] flex-col"
               onSubmit={(e) => {
                 e.preventDefault();
                 handleEditSave();
               }}
             >
-              <DialogHeader>
+              <DialogHeader className="border-b border-border px-4 py-3">
                 <DialogTitle>Edit Product</DialogTitle>
               </DialogHeader>
-              {editingProduct && (
-                <ProductFormFields value={editingProduct} onChange={(next) => setEditingProduct({ ...editingProduct, ...next })} />
-              )}
-              <DialogFooter>
+              <div className="flex-1 overflow-y-auto px-4">
+                {editingProduct && (
+                  <ProductFormFields value={editingProduct} onChange={(next) => setEditingProduct({ ...editingProduct, ...next })} />
+                )}
+              </div>
+              <DialogFooter className="border-t border-border px-4 py-3">
                 <Button type="submit" disabled={isUpdating || !editingProduct?.name}>
                   {isUpdating ? "Saving..." : "Save Changes"}
                 </Button>
@@ -204,6 +283,9 @@ export default function Products() {
                 const primaryPrice = deriveUnitPriceFromBase(basePrice, unitConfig, primaryUnit);
                 const primaryCostPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, primaryUnit);
                 const stock = Number(product.stock || 0);
+                const displayStock = usesTwoUnits
+                  ? fromBaseQuantity(stock, unitConfig, primaryUnit)
+                  : stock;
                 const lowStockThreshold = Number(product.lowStockThreshold || 10);
 
                 return (
@@ -251,12 +333,17 @@ export default function Products() {
                             stock <= lowStockThreshold ? "text-red-500" : "text-foreground",
                           )}
                         >
-                          {stock} {baseUnit}
+                          {displayStock} {usesTwoUnits ? primaryUnit : baseUnit}
                           {stock <= lowStockThreshold && (
                             <AlertTriangle className="inline w-3 h-3 ml-1" />
                           )}
                         </div>
                       </div>
+                      {usesTwoUnits && (
+                        <div className="text-xs text-muted-foreground text-right">
+                          Stored as: {stock} {baseUnit}
+                        </div>
+                      )}
                       <div className="flex justify-between items-center pt-1 border-t border-border/50">
                         <span className="text-xs text-muted-foreground">Profit/Base Unit</span>
                         <div className="font-mono text-sm font-semibold text-green-600">
@@ -291,8 +378,9 @@ export default function Products() {
                         secondaryUnit: (product.secondaryUnit || "KG") as ProductDraft["secondaryUnit"],
                         unitConversion: product.unitConversion ? String(product.unitConversion) : "",
                         sku: product.sku ?? "",
-                        stock: String(product.stock ?? 0),
-                        lowStockThreshold: String(product.lowStockThreshold ?? 10),
+                        stock: String(fromBaseQuantity(Number(product.stock ?? 0), unitConfig, defaultSalesUnit)),
+                        stockInputUnit: defaultSalesUnit,
+                        lowStockThreshold: String(fromBaseQuantity(Number(product.lowStockThreshold ?? 10), unitConfig, defaultSalesUnit)),
                       });
                       setIsEditOpen(true);
                     }}
@@ -305,7 +393,18 @@ export default function Products() {
                     disabled={isDeleting}
                     onClick={() => {
                       if (window.confirm("Are you sure you want to delete this product? This cannot be undone.")) {
-                        deleteProduct(product.id);
+                        deleteProduct(product.id, {
+                          onSuccess: () => {
+                            toast({ title: "Product deleted", description: "The product was removed from the active list." });
+                          },
+                          onError: (error) => {
+                            toast({
+                              title: "Could not delete product",
+                              description: error instanceof Error ? error.message : "Please try again.",
+                              variant: "destructive",
+                            });
+                          },
+                        });
                       }
                     }}
                   >
@@ -324,5 +423,12 @@ export default function Products() {
         </div>
       )}
     </div>
+
+      <VoiceAssistant
+        title="Products Voice Helper"
+        subtitle="Search products or create a new one by voice."
+        commands={productVoiceCommands}
+      />
+    </>
   );
 }

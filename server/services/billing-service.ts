@@ -1,6 +1,8 @@
 import { and, eq, sum, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  accounts,
+  accountTransactions,
   bills,
   billCharges,
   billItems,
@@ -60,6 +62,11 @@ async function getCustomerOutstandingBalance(tx: AppDb, customerId: number) {
 
 function getOldBalancePaymentNote(billId: number) {
   return `Old balance payment during bill #${billId}`;
+}
+
+function getBillAccountCreditNote(billId: number, customerName?: string | null) {
+  const label = customerName?.trim() ? `${customerName.trim()} money` : "Walk-in money";
+  return `${label} (Bill #${billId})`;
 }
 
 type PreparedBillMutation = {
@@ -220,6 +227,9 @@ async function applyBillArtifacts(
   tx: AppDb,
   billId: number,
   payload: PreparedBillMutation,
+  options?: {
+    paymentAccountId?: number;
+  },
 ) {
   for (const itemData of payload.billItemsData) {
     await tx.insert(billItems).values({
@@ -264,6 +274,18 @@ async function applyBillArtifacts(
   }
 
   if (!payload.customerId) {
+    if (payload.billPaidAmount > 0 && options?.paymentAccountId) {
+      const [account] = await tx.select().from(accounts).where(eq(accounts.id, options.paymentAccountId));
+      if (!account) throw new Error("Selected account not found");
+
+      await tx.insert(accountTransactions).values({
+        accountId: account.id,
+        type: "credit",
+        amount: payload.billPaidAmount.toFixed(2),
+        note: getBillAccountCreditNote(billId, null),
+        date: payload.billDate,
+      });
+    }
     return;
   }
 
@@ -281,6 +303,8 @@ async function applyBillArtifacts(
   }
 
   if (payload.billPaidAmount > 0) {
+    const [customer] = await tx.select().from(customers).where(eq(customers.id, payload.customerId));
+
     await tx.insert(payments).values({
       customerId: payload.customerId,
       billId,
@@ -300,6 +324,19 @@ async function applyBillArtifacts(
       });
     } catch (error) {
       if (!isMissingLedgerTableError(error)) throw error;
+    }
+
+    if (options?.paymentAccountId) {
+      const [account] = await tx.select().from(accounts).where(eq(accounts.id, options.paymentAccountId));
+      if (!account) throw new Error("Selected account not found");
+
+      await tx.insert(accountTransactions).values({
+        accountId: account.id,
+        type: "credit",
+        amount: payload.billPaidAmount.toFixed(2),
+        note: getBillAccountCreditNote(billId, customer?.name),
+        date: payload.billDate,
+      });
     }
   }
 
@@ -332,6 +369,12 @@ async function reverseBillArtifacts(
   billId: number,
   customerId?: number | null,
 ) {
+  let customerName: string | null = null;
+  if (customerId) {
+    const [customer] = await tx.select().from(customers).where(eq(customers.id, customerId));
+    customerName = customer?.name ?? null;
+  }
+
   const existingItems = await tx.select().from(billItems).where(eq(billItems.billId, billId));
 
   for (const item of existingItems) {
@@ -350,6 +393,20 @@ async function reverseBillArtifacts(
   await tx.delete(billItems).where(eq(billItems.billId, billId));
   await tx.delete(billCharges).where(eq(billCharges.billId, billId));
   await tx.delete(payments).where(eq(payments.billId, billId));
+  await tx
+    .delete(accountTransactions)
+    .where(
+      eq(
+        accountTransactions.note,
+        getBillAccountCreditNote(billId, customerName),
+      ),
+    );
+
+  if (!customerName) {
+    await tx
+      .delete(accountTransactions)
+      .where(eq(accountTransactions.note, getBillAccountCreditNote(billId, null)));
+  }
 
   if (customerId) {
     await tx
@@ -402,7 +459,7 @@ export async function createBillTransaction(db: AppDb, data: CreateBillRequest) 
       })
       .returning();
 
-    await applyBillArtifacts(tx, bill.id, payload);
+    await applyBillArtifacts(tx, bill.id, payload, { paymentAccountId: data.paymentAccountId });
 
     return bill;
   });
@@ -452,9 +509,31 @@ export async function updateBillTransaction(
       .where(eq(bills.id, billId))
       .returning();
 
-    await applyBillArtifacts(tx, billId, payload);
+    await applyBillArtifacts(tx, billId, payload, { paymentAccountId: data.paymentAccountId });
 
     return updatedBill;
+  });
+}
+
+export async function deleteBillTransaction(db: AppDb, billId: number) {
+  return db.transaction(async (tx) => {
+    const [existingBill] = await tx.select().from(bills).where(eq(bills.id, billId));
+    if (!existingBill) {
+      throw new Error("Bill not found");
+    }
+    if (existingBill.status !== "completed") {
+      throw new Error("Only completed bills can be deleted");
+    }
+
+    await reverseBillArtifacts(tx, billId, existingBill.customerId);
+
+    await tx
+      .update(bills)
+      .set({
+        status: "voided",
+        lastEditedAt: new Date(),
+      })
+      .where(eq(bills.id, billId));
   });
 }
 

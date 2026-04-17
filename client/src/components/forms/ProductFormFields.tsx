@@ -10,10 +10,12 @@ import {
 import { formatCurrencyINR } from "@/lib/format";
 import {
   deriveUnitPriceFromBase,
+  fromBaseQuantity,
   getBaseUnit,
   getPrimaryUnit,
   hasSecondaryUnit,
   normalizeUnitPriceToBase,
+  toBaseQuantity,
   UNIT_OPTIONS,
   type UnitOption,
 } from "@shared/units";
@@ -30,19 +32,29 @@ export type ProductDraft = {
   unitConversion: string;
   sku: string;
   stock: string;
+  stockInputUnit: UnitOption;
   lowStockThreshold: string;
 };
 
 type Props = {
   value: ProductDraft;
   onChange: (next: ProductDraft) => void;
+  onStockChange?: () => void;
+  onLowStockThresholdChange?: () => void;
+  onStockInputUnitChange?: () => void;
 };
 
 function getFirstDifferentUnit(unit: UnitOption): UnitOption {
   return UNIT_OPTIONS.find((option) => option !== unit) || "PCS";
 }
 
-export function ProductFormFields({ value, onChange }: Props) {
+export function ProductFormFields({
+  value,
+  onChange,
+  onStockChange,
+  onLowStockThresholdChange,
+  onStockInputUnitChange,
+}: Props) {
   const unitConfig = {
     primaryUnit: value.primaryUnit,
     secondaryUnit: value.hasSecondaryUnit ? value.secondaryUnit : null,
@@ -60,19 +72,36 @@ export function ProductFormFields({ value, onChange }: Props) {
   const secondarySalePrice = deriveUnitPriceFromBase(baseSalePrice, unitConfig, baseUnit);
   const primaryCostPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, primaryUnit);
   const secondaryCostPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, baseUnit);
+  const stockNumber = Number(value.stock || 0);
+  const lowStockThresholdNumber = Number(value.lowStockThreshold || 0);
+  const baseStockQuantity = toBaseQuantity(stockNumber, unitConfig, value.stockInputUnit);
+  const baseLowStockThreshold = toBaseQuantity(lowStockThresholdNumber, unitConfig, value.stockInputUnit);
+  const primaryStockQuantity = fromBaseQuantity(baseStockQuantity, unitConfig, primaryUnit);
+  const secondaryStockQuantity = fromBaseQuantity(baseStockQuantity, unitConfig, baseUnit);
 
   return (
-    <div className="space-y-5 py-4">
-      <div className="space-y-2">
-        <label className="text-sm font-medium">Product Name</label>
-        <Input
-          placeholder="e.g. Rice Bag"
-          value={value.name}
-          onChange={(e) => onChange({ ...value, name: e.target.value })}
-        />
+    <div className="space-y-3 py-3">
+      <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Product Name</label>
+          <Input
+            placeholder="e.g. Rice Bag"
+            value={value.name}
+            onChange={(e) => onChange({ ...value, name: e.target.value })}
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">SKU (Optional)</label>
+          <Input
+            placeholder="Barcode"
+            value={value.sku}
+            onChange={(e) => onChange({ ...value, sku: e.target.value })}
+          />
+        </div>
       </div>
 
-      <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-3">
         <div className="flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-medium">Unit Setup</p>
@@ -82,7 +111,7 @@ export function ProductFormFields({ value, onChange }: Props) {
             <span className="text-sm text-muted-foreground">Secondary Unit</span>
             <Switch
               checked={value.hasSecondaryUnit}
-              onCheckedChange={(checked) =>
+                onCheckedChange={(checked) =>
                 onChange({
                   ...value,
                   hasSecondaryUnit: checked,
@@ -91,7 +120,7 @@ export function ProductFormFields({ value, onChange }: Props) {
                       ? getFirstDifferentUnit(value.primaryUnit)
                       : value.secondaryUnit
                     : value.secondaryUnit,
-                  unitConversion: checked ? value.unitConversion || "1" : "",
+                  unitConversion: checked ? value.unitConversion || "2" : "",
                   priceInputUnit: checked ? value.priceInputUnit : value.primaryUnit,
                   costPriceInputUnit: checked ? value.costPriceInputUnit : value.primaryUnit,
                 })
@@ -100,7 +129,7 @@ export function ProductFormFields({ value, onChange }: Props) {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div className="space-y-2">
             <label className="text-sm font-medium">Primary Unit</label>
             <Select
@@ -172,20 +201,21 @@ export function ProductFormFields({ value, onChange }: Props) {
         </div>
       </div>
 
-      <div className="rounded-xl border border-border bg-card p-4 space-y-4">
+      <div className="rounded-xl border border-border bg-card p-3 space-y-3">
         <div>
           <p className="text-sm font-medium">Pricing</p>
           <p className="text-xs text-muted-foreground">Enter the price in either unit and the other side will auto-derive.</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="space-y-2">
             <label className="text-sm font-medium">Selling Price</label>
             <div className="grid grid-cols-[1fr_140px] gap-2">
               <Input
                 type="number"
                 min="0"
-                step="0.01"
+                step="any"
+                inputMode="decimal"
                 placeholder="0.00"
                 value={value.price}
                 onChange={(e) => onChange({ ...value, price: e.target.value })}
@@ -222,7 +252,8 @@ export function ProductFormFields({ value, onChange }: Props) {
               <Input
                 type="number"
                 min="0"
-                step="0.01"
+                step="any"
+                inputMode="decimal"
                 placeholder="0.00"
                 value={value.costPrice}
                 onChange={(e) => onChange({ ...value, costPrice: e.target.value })}
@@ -254,34 +285,69 @@ export function ProductFormFields({ value, onChange }: Props) {
           </div>
         </div>
       </div>
-
-      <div className="space-y-2">
-        <label className="text-sm font-medium">SKU (Optional)</label>
-        <Input
-          placeholder="Barcode"
-          value={value.sku}
-          onChange={(e) => onChange({ ...value, sku: e.target.value })}
-        />
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <div className="space-y-2">
-          <label className="text-sm font-medium">Stock ({baseUnit})</label>
-          <Input
-            type="number"
-            placeholder="0"
-            value={value.stock}
-            onChange={(e) => onChange({ ...value, stock: e.target.value })}
-          />
+          <label className="text-sm font-medium">Stock</label>
+          <div className="grid grid-cols-[1fr_140px] gap-2">
+            <Input
+              type="number"
+              min="0"
+              step="any"
+              inputMode="decimal"
+              placeholder="0"
+              value={value.stock}
+              onChange={(e) => {
+                onStockChange?.();
+                onChange({ ...value, stock: e.target.value });
+              }}
+            />
+            <Select
+              value={value.stockInputUnit}
+              onValueChange={(next) => {
+                onStockInputUnitChange?.();
+                onChange({ ...value, stockInputUnit: next as UnitOption });
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {[primaryUnit, ...(showSecondary ? [baseUnit] : [])].map((unit) => (
+                  <SelectItem key={unit} value={unit}>
+                    {unit}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Stored stock: {baseStockQuantity} {baseUnit}
+          </div>
+          {showSecondary && (
+            <div className="text-xs text-muted-foreground">
+              {primaryStockQuantity} {primaryUnit} and {secondaryStockQuantity} {baseUnit}
+            </div>
+          )}
         </div>
         <div className="space-y-2">
-          <label className="text-sm font-medium">Low Stock Alert ({baseUnit})</label>
+          <label className="text-sm font-medium">Low Stock Alert</label>
           <Input
             type="number"
+            min="0"
+            step="any"
+            inputMode="decimal"
             placeholder="10"
             value={value.lowStockThreshold}
-            onChange={(e) => onChange({ ...value, lowStockThreshold: e.target.value })}
+            onChange={(e) => {
+              onLowStockThresholdChange?.();
+              onChange({ ...value, lowStockThreshold: e.target.value });
+            }}
           />
+          <div className="text-xs text-muted-foreground">
+            Threshold uses {value.stockInputUnit} input and stores as {baseLowStockThreshold} {baseUnit}.
+          </div>
         </div>
       </div>
     </div>

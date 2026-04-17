@@ -2,6 +2,15 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildUrl, type CreateBillInput, type UpdateBillInput, type CreateQuotationInput, type UpdateQuotationInput, type UpdateQuotationStatusInput, type CreateRepaymentInput, type CreateLedgerCreditInput } from "@shared/routes";
 import { type Customer, type Product, type Bill } from "@shared/schema";
 
+function invalidateCustomerQueries(queryClient: ReturnType<typeof useQueryClient>, customerId: number) {
+  queryClient.invalidateQueries({
+    predicate: (query) =>
+      Array.isArray(query.queryKey) &&
+      query.queryKey[0] === api.customers.get.path &&
+      query.queryKey[1] === customerId,
+  });
+}
+
 // --- Staff Hooks ---
 
 export function useStaff() {
@@ -210,12 +219,12 @@ export function useSpendFromAccount() {
 export function useAddToAccount() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { id: number; amount: number; note: string }) => {
+    mutationFn: async (data: { id: number; amount: number; note: string; customerId?: number }) => {
       const url = buildUrl(api.accounts.credit.path, { id: data.id });
       const res = await fetch(url, {
         method: api.accounts.credit.method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: data.amount, note: data.note }),
+        body: JSON.stringify({ amount: data.amount, note: data.note, customerId: data.customerId }),
       });
       if (!res.ok) {
         const error = await res.json().catch(() => null);
@@ -227,6 +236,46 @@ export function useAddToAccount() {
       queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.accounts.get.path, vars.id] });
       queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.customers.get.path,
+      });
+      if (vars.customerId) {
+        queryClient.invalidateQueries({ queryKey: [api.customers.get.path, vars.customerId] });
+      }
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
+    },
+  });
+}
+
+export function useDeleteAccountTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { id: number; transactionId: number }) => {
+      const url = buildUrl(api.accounts.deleteTransaction.path, {
+        id: data.id,
+        transactionId: data.transactionId,
+      });
+      const res = await fetch(url, {
+        method: api.accounts.deleteTransaction.method,
+      });
+      if (!res.ok && res.status !== 204) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to delete transaction");
+      }
+      return data;
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.get.path, result.id] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.customers.get.path,
+      });
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
     },
   });
 }
@@ -234,7 +283,12 @@ export function useAddToAccount() {
 export function useAddInvestment() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { amount: number; note: string; date?: string }) => {
+    mutationFn: async (data: {
+      amount: number;
+      note: string;
+      date?: string;
+      purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>;
+    }) => {
       const res = await fetch(api.accounts.addInvestment.path, {
         method: api.accounts.addInvestment.method,
         headers: { "Content-Type": "application/json" },
@@ -248,6 +302,9 @@ export function useAddInvestment() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
     },
   });
 }
@@ -422,11 +479,14 @@ export function useRepayCustomer() {
     },
     onSuccess: (_payment, variables) => {
       // Refresh customer details, customer list, and dashboard stats
-      queryClient.invalidateQueries({
-        queryKey: [api.customers.get.path, variables.customerId],
-      });
+      invalidateCustomerQueries(queryClient, variables.customerId);
       queryClient.invalidateQueries({
         queryKey: [api.customers.list.path],
+      });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.accounts.get.path,
       });
       queryClient.invalidateQueries({
         queryKey: [api.dashboard.stats.path],
@@ -459,9 +519,7 @@ export function useAddCustomerCredit() {
       return api.customers.addCredit.responses[201].parse(await res.json());
     },
     onSuccess: (_ledgerEntry, variables) => {
-      queryClient.invalidateQueries({
-        queryKey: [api.customers.get.path, variables.customerId],
-      });
+      invalidateCustomerQueries(queryClient, variables.customerId);
       queryClient.invalidateQueries({
         queryKey: [api.customers.list.path],
       });
@@ -489,9 +547,7 @@ export function useUpdateCustomerProfit() {
       return api.customers.updateProfit.responses[200].parse(await res.json());
     },
     onSuccess: (_result, variables) => {
-      queryClient.invalidateQueries({
-        queryKey: [api.customers.get.path, variables.customerId],
-      });
+      invalidateCustomerQueries(queryClient, variables.customerId);
       queryClient.invalidateQueries({
         queryKey: [api.customers.list.path],
       });
@@ -537,11 +593,105 @@ export function useCreateProduct() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
-      if (!res.ok) throw new Error("Failed to create product");
+      if (!res.ok) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to create product");
+      }
       return api.products.create.responses[201].parse(await res.json());
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.products.list.path,
+      });
+    },
+  });
+}
+
+export function useUpdateCustomerDailyProfit() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { customerId: number; profitDate: string; totalProfit: number }) => {
+      const url = buildUrl(api.customers.updateDailyProfit.path, { id: data.customerId });
+      const res = await fetch(url, {
+        method: api.customers.updateDailyProfit.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profitDate: data.profitDate, totalProfit: data.totalProfit }),
+      });
+      if (!res.ok) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to update day-wise profit");
+      }
+      return api.customers.updateDailyProfit.responses[200].parse(await res.json());
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: [api.customers.get.path, result.customerId] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.customers.get.path,
+      });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
+    },
+  });
+}
+
+export function useDeleteCustomerCredit() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { customerId: number; entryId: number }) => {
+      const url = buildUrl(api.customers.deleteCredit.path, {
+        id: data.customerId,
+        entryId: data.entryId,
+      });
+      const res = await fetch(url, {
+        method: api.customers.deleteCredit.method,
+      });
+      if (!res.ok && res.status !== 204) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to delete credit");
+      }
+      return data;
+    },
+    onSuccess: (variables) => {
+      queryClient.invalidateQueries({ queryKey: [api.customers.get.path, variables.customerId] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.customers.get.path,
+      });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
+    },
+  });
+}
+
+export function useDeleteCustomerPayment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { customerId: number; paymentId: number }) => {
+      const url = buildUrl(api.customers.deleteRepayment.path, {
+        id: data.customerId,
+        paymentId: data.paymentId,
+      });
+      const res = await fetch(url, {
+        method: api.customers.deleteRepayment.method,
+      });
+      if (!res.ok && res.status !== 204) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to delete payment");
+      }
+      return data;
+    },
+    onSuccess: (variables) => {
+      queryClient.invalidateQueries({ queryKey: [api.customers.get.path, variables.customerId] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.customers.get.path,
+      });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
     },
   });
 }
@@ -586,8 +736,23 @@ export function useUpdateProduct() {
       }
       return api.products.update.responses[200].parse(await res.json());
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+    onSuccess: (updatedProduct) => {
+      queryClient.setQueriesData(
+        {
+          predicate: (query) =>
+            Array.isArray(query.queryKey) && query.queryKey[0] === api.products.list.path,
+        },
+        (existing) => {
+          if (!Array.isArray(existing)) return existing;
+          return existing.map((product: any) =>
+            product?.id === updatedProduct.id ? updatedProduct : product,
+          );
+        },
+      );
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.products.list.path,
+      });
     },
   });
 }
@@ -606,7 +771,10 @@ export function useDeleteProduct() {
       return id;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.products.list.path,
+      });
     },
   });
 }
@@ -637,6 +805,44 @@ export function useBill(id: number) {
   });
 }
 
+type LastBilledItemMemoryQuery = {
+  customerId: number;
+  productId?: number;
+  name?: string;
+};
+
+export async function fetchLastBilledItemMemory(query: LastBilledItemMemoryQuery) {
+  const params = new URLSearchParams({
+    customerId: String(query.customerId),
+  });
+
+  if (query.productId !== undefined) {
+    params.set("productId", String(query.productId));
+  }
+
+  if (query.name?.trim()) {
+    params.set("name", query.name.trim());
+  }
+
+  const res = await fetch(`${api.bills.itemMemory.path}?${params.toString()}`);
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(error?.message || "Failed to fetch item memory");
+  }
+
+  return api.bills.itemMemory.responses[200].parse(await res.json());
+}
+
+export function useLastBilledItemMemory(query?: LastBilledItemMemoryQuery) {
+  return useQuery({
+    queryKey: [api.bills.itemMemory.path, query?.customerId, query?.productId, query?.name?.trim().toLowerCase()],
+    queryFn: async () => fetchLastBilledItemMemory(query as LastBilledItemMemoryQuery),
+    enabled:
+      typeof query?.customerId === "number" &&
+      (typeof query?.productId === "number" || Boolean(query?.name?.trim())),
+  });
+}
+
 export function useCreateBill() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -660,6 +866,11 @@ export function useCreateBill() {
       queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
       queryClient.invalidateQueries({ queryKey: [api.products.list.path] }); // Refresh products to show updated stock
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.accounts.get.path,
+      });
     },
   });
 }
@@ -686,9 +897,48 @@ export function useUpdateBill() {
     onSuccess: (_bill, variables) => {
       queryClient.invalidateQueries({ queryKey: [api.bills.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.bills.get.path, variables.id] });
+      if (variables.bill.customerId) {
+        invalidateCustomerQueries(queryClient, variables.bill.customerId);
+      }
       queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
       queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.accounts.get.path,
+      });
+    },
+  });
+}
+
+export function useDeleteBill() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) => {
+      const url = buildUrl(api.bills.delete.path, { id });
+      const res = await fetch(url, {
+        method: api.bills.delete.method,
+      });
+      if (!res.ok && res.status !== 204) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to delete bill");
+      }
+      return id;
+    },
+    onSuccess: (id) => {
+      queryClient.invalidateQueries({ queryKey: [api.bills.list.path] });
+      queryClient.removeQueries({ queryKey: [api.bills.get.path, id] });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
+      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.accounts.get.path,
+      });
     },
   });
 }

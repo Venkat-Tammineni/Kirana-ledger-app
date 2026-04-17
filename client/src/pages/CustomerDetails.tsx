@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useCustomer, useRepayCustomer, useAddCustomerCredit, useUpdateCustomerProfit } from "@/hooks/use-pos";
+import { useAccounts, useCustomer, useRepayCustomer, useAddCustomerCredit, useDeleteCustomerCredit, useDeleteCustomerPayment, useUpdateCustomerDailyProfit, useUpdateCustomerProfit } from "@/hooks/use-pos";
 import { useRoute, Link } from "wouter";
 import { MetricCard } from "@/components/MetricCard";
 import {
@@ -10,6 +10,7 @@ import {
   IndianRupee,
   MessageCircle,
   Receipt,
+  Trash2,
   TrendingUp,
   Wallet,
 } from "lucide-react";
@@ -23,11 +24,23 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import { cn } from "@/lib/utils";
 import { formatCurrencyINR, formatDate, formatDateTime, toDateInputString, toISTDateTimeStringForApi } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
+import { parseSpokenAmount, parseVoiceDateInput } from "@/lib/voice-commands";
 
 type EntryMode = "CREDIT" | "PAYMENT" | null;
 
@@ -37,17 +50,25 @@ export default function CustomerDetails() {
   const [selectedProfitDate, setSelectedProfitDate] = useState<Date>(new Date());
   const selectedProfitDateKey = toDateInputString(selectedProfitDate);
   const { data: customer, isLoading } = useCustomer(id, selectedProfitDateKey);
+  const { data: accounts } = useAccounts();
   const { mutate: repayCustomer, isPending: isRepaying } = useRepayCustomer();
   const { mutate: addCustomerCredit, isPending: isAddingCredit } = useAddCustomerCredit();
+  const { mutate: deleteCustomerPayment, isPending: isDeletingPayment } = useDeleteCustomerPayment();
+  const { mutate: deleteCustomerCredit, isPending: isDeletingCredit } = useDeleteCustomerCredit();
   const { mutate: updateCustomerProfit, isPending: isUpdatingProfit } = useUpdateCustomerProfit();
+  const { mutate: updateCustomerDailyProfit, isPending: isUpdatingDailyProfit } = useUpdateCustomerDailyProfit();
   const { toast } = useToast();
 
   const [entryMode, setEntryMode] = useState<EntryMode>(null);
   const [entryAmount, setEntryAmount] = useState("");
   const [entryNote, setEntryNote] = useState("");
   const [entryDate, setEntryDate] = useState<Date | undefined>(undefined);
+  const [paymentAccountId, setPaymentAccountId] = useState<number | null>(null);
   const [isProfitDialogOpen, setIsProfitDialogOpen] = useState(false);
+  const [isDailyProfitDialogOpen, setIsDailyProfitDialogOpen] = useState(false);
   const [profitAmount, setProfitAmount] = useState("");
+  const [dailyProfitAmount, setDailyProfitAmount] = useState("");
+  const [entryToDelete, setEntryToDelete] = useState<{ id: number; type: "PAYMENT" | "CREDIT"; amount: number } | null>(null);
 
   const isSaving = isRepaying || isAddingCredit;
 
@@ -69,6 +90,7 @@ export default function CustomerDetails() {
     setEntryAmount("");
     setEntryNote("");
     setEntryDate(undefined);
+    setPaymentAccountId(null);
   };
 
   const closeEntryDialog = () => {
@@ -76,6 +98,7 @@ export default function CustomerDetails() {
     setEntryAmount("");
     setEntryNote("");
     setEntryDate(undefined);
+    setPaymentAccountId(null);
   };
 
   const handleSubmitEntry = () => {
@@ -89,6 +112,7 @@ export default function CustomerDetails() {
           amount,
           note: entryNote || "Manual payment",
           date: entryDate ? toISTDateTimeStringForApi(entryDate) : undefined,
+          paymentAccountId: paymentAccountId ?? undefined,
         },
         {
           onSuccess: () => {
@@ -165,6 +189,200 @@ export default function CustomerDetails() {
     );
   };
 
+  const openDailyProfitDialog = () => {
+    if (!customer) return;
+    setDailyProfitAmount(String(Number(customer.todayProfit || 0)));
+    setIsDailyProfitDialogOpen(true);
+  };
+
+  const handleDailyProfitSave = () => {
+    if (!customer) return;
+    const totalProfit = Number(dailyProfitAmount);
+    if (!Number.isFinite(totalProfit)) return;
+
+    updateCustomerDailyProfit(
+      {
+        customerId: id,
+        profitDate: customer.selectedProfitDate,
+        totalProfit,
+      },
+      {
+        onSuccess: () => {
+          toast({ title: "Day-wise profit updated" });
+          setIsDailyProfitDialogOpen(false);
+        },
+        onError: (error: Error) => {
+          toast({ title: "Failed", description: error.message, variant: "destructive" });
+        },
+      },
+    );
+  };
+
+  const customerDetailVoiceCommands = [
+    {
+      label: "Add payment",
+      examples: ["add 5000", "payment 5000"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^(add|payment|add payment)\s+(.+)$/);
+        if (!match) return null;
+        const amount = parseSpokenAmount(match[2]);
+        if (amount == null) return "I could not understand that amount.";
+        openEntryDialog("PAYMENT");
+        setEntryAmount(String(amount));
+        return `Payment amount set to ${amount}. Press save to confirm.`;
+      },
+    },
+    {
+      label: "Add credit",
+      examples: ["credit 5000"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^credit\s+(.+)$/);
+        if (!match) return null;
+        const amount = parseSpokenAmount(match[1]);
+        if (amount == null) return "I could not understand that amount.";
+        openEntryDialog("CREDIT");
+        setEntryAmount(String(amount));
+        return `Credit amount set to ${amount}. Press save to confirm.`;
+      },
+    },
+    {
+      label: "Delete payment",
+      examples: ["delete payment 5000"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^delete\s+payment\s+(.+)$/);
+        if (!match) return null;
+        const amount = parseSpokenAmount(match[1]);
+        if (amount == null) return "I could not understand that payment amount.";
+        const matches = (customer?.ledger || []).filter(
+          (entry) =>
+            entry.type === "PAYMENT" &&
+            !entry.billId &&
+            Number(entry.amount || 0) === amount,
+        );
+        if (matches.length !== 1) {
+          return `I found ${matches.length} matching payments for ${amount}. Please delete it manually if there are multiple.`;
+        }
+        setEntryToDelete({
+          id: matches[0].id,
+          type: "PAYMENT",
+          amount,
+        });
+        return `Ready to delete payment ${amount}. Please confirm.`;
+      },
+    },
+    {
+      label: "Delete credit",
+      examples: ["delete credit 5000"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^delete\s+credit\s+(.+)$/);
+        if (!match) return null;
+        const amount = parseSpokenAmount(match[1]);
+        if (amount == null) return "I could not understand that credit amount.";
+        const matches = (customer?.ledger || []).filter(
+          (entry) =>
+            entry.type === "CREDIT" &&
+            !entry.billId &&
+            Number(entry.amount || 0) === amount,
+        );
+        if (matches.length !== 1) {
+          return `I found ${matches.length} matching credits for ${amount}. Please delete it manually if there are multiple.`;
+        }
+        setEntryToDelete({
+          id: matches[0].id,
+          type: "CREDIT",
+          amount,
+        });
+        return `Ready to delete credit ${amount}. Please confirm.`;
+      },
+    },
+    {
+      label: "Set selected day profit",
+      examples: ["set day profit to 1200"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^set\s+(day\s+)?profit\s+to\s+(.+)$/);
+        if (!match) return null;
+        const amount = parseSpokenAmount(match[2]);
+        if (amount == null) return "I could not understand that profit amount.";
+        setDailyProfitAmount(String(amount));
+        setIsDailyProfitDialogOpen(true);
+        return `Day profit set to ${amount}. Please save to confirm.`;
+      },
+    },
+    {
+      label: "Set profit by date",
+      examples: ["set profit on 05-04-2026 to 1200"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^set\s+profit\s+on\s+(.+)\s+to\s+(\d+(?:\.\d+)?)$/);
+        if (!match) return null;
+        const parsedDate = parseVoiceDateInput(match[1].trim());
+        if (!parsedDate) return "I could not understand that profit date.";
+        const amount = Number(match[2]);
+        if (!Number.isFinite(amount)) return "I could not understand that profit amount.";
+        setSelectedProfitDate(parsedDate);
+        setDailyProfitAmount(String(amount));
+        setIsDailyProfitDialogOpen(true);
+        return `Opened day profit for ${formatDate(parsedDate, "dd MMM yyyy")}. Please save to confirm.`;
+      },
+    },
+    {
+      label: "Save payment or credit",
+      examples: ["save payment now", "save credit now"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        if (!["save payment now", "save credit now", "save now", "confirm payment", "confirm credit"].includes(normalized)) {
+          return null;
+        }
+        if (!entryMode) return "There is no open payment or credit form to save.";
+        if (!entryAmount) return "Enter an amount first before saving.";
+        handleSubmitEntry();
+        return `${entryMode === "PAYMENT" ? "Saving payment" : "Saving credit"} now.`;
+      },
+    },
+    {
+      label: "Save profit",
+      examples: ["save profit now", "save day profit now"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        if (["save profit now", "save total profit now"].includes(normalized)) {
+          if (!isProfitDialogOpen) return "Total profit editor is not open.";
+          if (profitAmount === "") return "Enter the profit amount first.";
+          handleProfitSave();
+          return "Saving total profit now.";
+        }
+        if (["save day profit now", "save selected day profit now"].includes(normalized)) {
+          if (!isDailyProfitDialogOpen) return "Day-wise profit editor is not open.";
+          if (dailyProfitAmount === "") return "Enter the day profit amount first.";
+          handleDailyProfitSave();
+          return "Saving day-wise profit now.";
+        }
+        return null;
+      },
+    },
+    {
+      label: "Confirm delete",
+      examples: ["yes delete", "confirm delete"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        if (!["yes delete", "confirm delete", "delete now"].includes(normalized)) return null;
+        if (!entryToDelete) return "There is no delete action waiting for confirmation.";
+        const onSuccess = () => {
+          toast({
+            title: `${entryToDelete.type === "PAYMENT" ? "Payment" : "Credit"} deleted`,
+            description: `${formatCurrencyINR(entryToDelete.amount)} was reversed successfully.`,
+          });
+          setEntryToDelete(null);
+        };
+        const onError = (error: Error) => {
+          toast({ title: "Delete failed", description: error.message, variant: "destructive" });
+        };
+
+        if (entryToDelete.type === "PAYMENT") {
+          deleteCustomerPayment({ customerId: id, paymentId: entryToDelete.id }, { onSuccess, onError });
+        } else {
+          deleteCustomerCredit({ customerId: id, entryId: entryToDelete.id }, { onSuccess, onError });
+        }
+        return "Deleting that customer entry now.";
+      },
+    },
+  ];
+
   if (isLoading) {
     return (
       <div className="p-8 max-w-7xl mx-auto space-y-6">
@@ -183,6 +401,7 @@ export default function CustomerDetails() {
   const balance = Number(customer.balance || 0);
 
   return (
+    <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-8 pb-24 md:pb-8">
       <div className="flex flex-col gap-4">
         <Link href="/customers" className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors">
@@ -263,6 +482,9 @@ export default function CustomerDetails() {
                 />
               </PopoverContent>
             </Popover>
+            <Button variant="outline" onClick={openDailyProfitDialog}>
+              Edit Day Profit
+            </Button>
             <Button variant="outline" onClick={openProfitDialog}>
               Edit Total Profit
             </Button>
@@ -336,6 +558,7 @@ export default function CustomerDetails() {
                   <th className="px-6 py-4 font-semibold">Note</th>
                   <th className="px-6 py-4 font-semibold text-right">Amount</th>
                   <th className="px-6 py-4 font-semibold text-right">Running Balance</th>
+                  <th className="px-6 py-4 font-semibold text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -385,11 +608,33 @@ export default function CustomerDetails() {
                     >
                       {formatCurrencyINR(Number(entry.runningBalance || 0))}
                     </td>
+                    <td className="px-6 py-4 text-right">
+                      {!entry.billId ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:text-destructive"
+                          onClick={() =>
+                            setEntryToDelete({
+                              id: entry.id,
+                              type: entry.type,
+                              amount: Number(entry.amount || 0),
+                            })
+                          }
+                        >
+                          <Trash2 className="w-4 h-4 mr-1" />
+                          Delete
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">Use bill</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {customer.ledger.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-6 py-8 text-center text-muted-foreground">
+                    <td colSpan={6} className="px-6 py-8 text-center text-muted-foreground">
                       No ledger entries yet.
                     </td>
                   </tr>
@@ -432,6 +677,23 @@ export default function CustomerDetails() {
                   placeholder={entryMode === "CREDIT" ? "e.g., Home delivery pending" : "e.g., Cash payment"}
                 />
               </div>
+              {entryMode === "PAYMENT" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Receive Into Account (optional)</label>
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={paymentAccountId ?? ""}
+                    onChange={(e) => setPaymentAccountId(e.target.value ? Number(e.target.value) : null)}
+                  >
+                    <option value="">Do not add to account</option>
+                    {(accounts || []).map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
               <div className="space-y-2">
                 <label className="text-sm font-medium">Date (optional)</label>
                 <Popover>
@@ -513,6 +775,88 @@ export default function CustomerDetails() {
           </form>
         </DialogContent>
       </Dialog>
+      <Dialog open={isDailyProfitDialogOpen} onOpenChange={setIsDailyProfitDialogOpen}>
+        <DialogContent>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleDailyProfitSave();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Edit Profit for {formatDate(selectedProfitDate, "dd MMM yyyy")}</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Day-wise Profit</label>
+                <Input
+                  autoFocus
+                  type="number"
+                  step="0.01"
+                  value={dailyProfitAmount}
+                  onChange={(e) => setDailyProfitAmount(e.target.value)}
+                  placeholder="Enter day-wise profit"
+                />
+              </div>
+              <p className="text-sm text-muted-foreground">
+                This changes the profit shown for the selected day and also updates the overall total profit accordingly.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setIsDailyProfitDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isUpdatingDailyProfit || dailyProfitAmount === ""}>
+                {isUpdatingDailyProfit ? "Saving..." : "Save Day Profit"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <AlertDialog open={!!entryToDelete} onOpenChange={(open) => !open && setEntryToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this customer entry?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will reverse the selected manual {entryToDelete?.type === "PAYMENT" ? "payment" : "credit"} entry for this customer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setEntryToDelete(null)}>Keep It</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!entryToDelete) return;
+                const onSuccess = () => {
+                  toast({
+                    title: `${entryToDelete.type === "PAYMENT" ? "Payment" : "Credit"} deleted`,
+                    description: `${formatCurrencyINR(entryToDelete.amount)} was reversed successfully.`,
+                  });
+                  setEntryToDelete(null);
+                };
+                const onError = (error: Error) => {
+                  toast({ title: "Delete failed", description: error.message, variant: "destructive" });
+                };
+
+                if (entryToDelete.type === "PAYMENT") {
+                  deleteCustomerPayment({ customerId: id, paymentId: entryToDelete.id }, { onSuccess, onError });
+                  return;
+                }
+
+                deleteCustomerCredit({ customerId: id, entryId: entryToDelete.id }, { onSuccess, onError });
+              }}
+              disabled={isDeletingPayment || isDeletingCredit}
+            >
+              {isDeletingPayment || isDeletingCredit ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+      <VoiceAssistant
+        title={`Customer Voice Helper`}
+        subtitle="Add or delete payment/credit entries, and set day profit by voice."
+        commands={customerDetailVoiceCommands}
+      />
+    </>
   );
 }

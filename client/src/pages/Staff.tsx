@@ -12,10 +12,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { MetricCard } from "@/components/MetricCard";
 import { useToast } from "@/hooks/use-toast";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { formatCurrencyINR, formatDate, toDateInputString } from "@/lib/format";
 import { CalendarDays, CheckCircle2, UserPlus, Users, Wallet, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getISTDateKey } from "@shared/timezone";
+import { parseVoiceDateInput } from "@/lib/voice-commands";
 
 type StaffDraft = {
   name: string;
@@ -162,7 +164,44 @@ export default function Staff() {
     );
   };
 
+  const staffVoiceCommands = [
+    {
+      label: "Mark present or absent",
+      examples: ["keep present for karthik on 05-04-2026", "keep absent for karthik on 05-04-2026"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const match = normalized.match(/^keep\s+(present|absent)\s+for\s+(.+?)\s+on\s+(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})$/);
+        if (!match) return null;
+        const status = match[1] as "present" | "absent";
+        const staffQuery = match[2].trim();
+        const parsedDate = parseVoiceDateInput(match[3]);
+        if (!parsedDate) return "I could not understand that staff date.";
+
+        const matches = (staff || []).filter((member) =>
+          member.name.toLowerCase().includes(staffQuery),
+        );
+        if (matches.length !== 1) return `I could not uniquely match ${staffQuery}. Please choose the staff member once manually.`;
+
+        setSelectedStaffId(matches[0].id);
+        setSelectedAttendanceDate(parsedDate);
+        markAttendance(
+          { staffId: matches[0].id, status, date: getISTDateKey(parsedDate) },
+          {
+            onSuccess: (attendance) => {
+              setTodayPaymentInput(String(Number(attendance.payment || 0)));
+              toast({ title: `Marked ${status}`, description: `${matches[0].name} updated for ${formatDate(parsedDate, "dd MMM yyyy")}.` });
+            },
+            onError: (error: Error) => {
+              toast({ title: "Failed", description: error.message, variant: "destructive" });
+            },
+          },
+        );
+        return `Marking ${matches[0].name} as ${status}.`;
+      },
+    },
+  ];
+
   return (
+    <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8 space-y-6">
       <div>
         <h1 className="text-3xl font-display font-bold text-foreground">Staff Management</h1>
@@ -247,8 +286,10 @@ export default function Staff() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="text-sm font-semibold">{formatCurrencyINR(member.totalPayment)}</div>
-                        <div className="text-xs text-muted-foreground">Total Payment</div>
+                        <div className="text-sm font-semibold text-primary">{formatCurrencyINR(member.thisMonthPayable)}</div>
+                        <div className="text-xs text-muted-foreground">Payable Now</div>
+                        <div className="text-xs font-medium mt-1">{formatCurrencyINR(member.totalPayment)}</div>
+                        <div className="text-[11px] text-muted-foreground">Total Paid</div>
                       </div>
                     </div>
                   </button>
@@ -293,6 +334,7 @@ export default function Staff() {
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                   <MetricCard title="Present Days" value={details.summary.presentDays} icon={<CheckCircle2 className="w-5 h-5" />} />
                   <MetricCard title="Absent Days" value={details.summary.absentDays} icon={<XCircle className="w-5 h-5" />} />
+                  <MetricCard title="Payable Now" value={formatCurrencyINR(details.summary.thisMonthPayable)} icon={<Wallet className="w-5 h-5" />} />
                   <MetricCard title={`Payment on ${formatDate(selectedAttendanceDate, "dd MMM")}`} value={formatCurrencyINR(Number(selectedAttendance?.payment || 0))} icon={<CalendarDays className="w-5 h-5" />} />
                   <MetricCard title="Total Paid" value={formatCurrencyINR(details.summary.totalPayment)} icon={<Wallet className="w-5 h-5" />} />
                 </div>
@@ -306,6 +348,11 @@ export default function Staff() {
                     <p className="text-sm text-muted-foreground">
                       Current status: <span className="font-medium capitalize">{selectedAttendance?.status || "not marked"}</span>
                     </p>
+                    {selectedStaff.salaryType === "daily" && (
+                      <p className="text-sm text-muted-foreground">
+                        Daily wage: <span className="font-medium text-foreground">{formatCurrencyINR(Number(selectedStaff.salaryAmount || 0))}</span>
+                      </p>
+                    )}
                     <div className="flex gap-3">
                       <Button
                         className="flex-1 bg-green-600 hover:bg-green-700 text-white"
@@ -406,5 +453,11 @@ export default function Staff() {
         </div>
       </div>
     </div>
+      <VoiceAssistant
+        title="Staff Voice Helper"
+        subtitle="Mark attendance by voice with staff name and date."
+        commands={staffVoiceCommands}
+      />
+    </>
   );
 }

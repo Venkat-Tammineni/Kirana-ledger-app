@@ -41,22 +41,29 @@ export default function Dashboard() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <MetricCard
-          title="Today's Sales"
-          value={formatCurrencyINR(stats?.todaySales || 0)}
-          icon={<IndianRupee className="w-6 h-6" />}
-          trend="+12%"
-          trendUp={true}
-          className="border-l-4 border-l-primary"
-        />
+        <a href="/reporting?range=daily#sales-breakdown" className="block">
+          <MetricCard
+            title="Today's Sales"
+            value={formatCurrencyINR(stats?.todaySales || 0)}
+            icon={<IndianRupee className="w-6 h-6" />}
+            trend="+12%"
+            trendUp={true}
+            subValue="Tap to see today's bill-wise sales"
+            className="border-l-4 border-l-primary"
+            clickable
+          />
+        </a>
 
-        <MetricCard
-          title="Today's Profit"
-          value={formatCurrencyINR(stats?.todayProfit || 0)}
-          icon={<TrendingUp className="w-6 h-6" />}
-          subValue="Profit from today's sales"
-          className="border-l-4 border-l-green-500"
-        />
+        <a href="/reporting?range=daily#profit-breakdown" className="block">
+          <MetricCard
+            title="Today's Profit"
+            value={formatCurrencyINR(stats?.todayProfit || 0)}
+            icon={<TrendingUp className="w-6 h-6" />}
+            subValue="Tap to see individual customer profits"
+            className="border-l-4 border-l-green-500"
+            clickable
+          />
+        </a>
 
         <MetricCard
           title="Total Pending Dues"
@@ -74,6 +81,31 @@ export default function Dashboard() {
           trendUp={true}
           className="border-l-4 border-l-accent"
         />
+      </div>
+
+      <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="font-display font-bold text-lg">Mirchi Powder Separate Totals</h3>
+            <p className="text-sm text-muted-foreground">These values are excluded from the main sales and profit cards above.</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <MetricCard
+            title="Today's Mirchi Powder Sales"
+            value={formatCurrencyINR(stats?.mirchiPowderSales || 0)}
+            icon={<IndianRupee className="w-6 h-6" />}
+            subValue="Separated from today's total sales"
+            className="border-l-4 border-l-orange-500"
+          />
+          <MetricCard
+            title="Today's Mirchi Powder Profit"
+            value={formatCurrencyINR(stats?.mirchiPowderProfit || 0)}
+            icon={<TrendingUp className="w-6 h-6" />}
+            subValue="Separated from today's total profit"
+            className="border-l-4 border-l-amber-600"
+          />
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

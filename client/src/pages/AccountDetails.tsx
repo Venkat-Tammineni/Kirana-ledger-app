@@ -1,14 +1,25 @@
 import { useMemo, useState } from "react";
 import { Link, useRoute } from "wouter";
-import { ArrowLeft, Minus, Plus, ReceiptText } from "lucide-react";
-import { useAccountDetails, useAddToAccount, useSpendFromAccount } from "@/hooks/use-pos";
+import { ArrowLeft, Minus, Plus, ReceiptText, Trash2 } from "lucide-react";
+import { useAccountDetails, useAddToAccount, useCustomers, useDeleteAccountTransaction, useSpendFromAccount } from "@/hooks/use-pos";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { getISTDateKey, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 type TransactionTypeFilter = "all" | "credit" | "spent";
 
@@ -16,16 +27,41 @@ export default function AccountDetails() {
   const [, params] = useRoute("/accounts/:id");
   const id = Number(params?.id);
   const { data: details, isLoading } = useAccountDetails(id);
+  const { data: customers } = useCustomers();
   const { mutate: spendFromAccount, isPending: spending } = useSpendFromAccount();
   const { mutate: addToAccount, isPending: crediting } = useAddToAccount();
+  const { mutate: deleteAccountTransaction, isPending: deletingTransaction } = useDeleteAccountTransaction();
   const { toast } = useToast();
 
   const [entryMode, setEntryMode] = useState<"credit" | "spent" | null>(null);
   const [entryAmount, setEntryAmount] = useState("");
   const [entryNote, setEntryNote] = useState("");
+  const [entryCustomerId, setEntryCustomerId] = useState<number | null>(null);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [typeFilter, setTypeFilter] = useState<TransactionTypeFilter>("all");
+  const [transactionToDelete, setTransactionToDelete] = useState<{ id: number; type: string; amount: number } | null>(null);
+
+  const parseSpokenAmount = (value: string) => {
+    const match = value.replace(/,/g, "").match(/(\d+(?:\.\d+)?)/);
+    return match ? Number(match[1]) : null;
+  };
+
+  const transactionBalanceMap = useMemo(() => {
+    if (!details) return new Map<number, number>();
+
+    let runningBalance = Number(details.currentBalance || 0);
+    const balanceByTransactionId = new Map<number, number>();
+
+    details.transactions.forEach((txn) => {
+      balanceByTransactionId.set(txn.id, runningBalance);
+
+      const amount = Number(txn.amount || 0);
+      runningBalance -= txn.type === "credit" ? amount : -amount;
+    });
+
+    return balanceByTransactionId;
+  }, [details]);
 
   const filteredTransactions = useMemo(() => {
     if (!details) return [];
@@ -65,11 +101,74 @@ export default function AccountDetails() {
     return Array.from(groups.entries()).sort(([a], [b]) => b.localeCompare(a));
   }, [filteredTransactions]);
 
+  const accountDetailVoiceCommands = useMemo(
+    () => [
+      {
+        label: "Open add amount",
+        examples: ["add amount"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          if (normalized !== "add amount") return null;
+          setEntryMode("credit");
+          return "Opening Add Amount.";
+        },
+      },
+      {
+        label: "Set amount",
+        examples: ["amount 5000"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^amount\s+(.+)$/);
+          if (!match) return null;
+          const amount = parseSpokenAmount(match[1]);
+          if (amount == null) return "I could not understand that amount.";
+          setEntryAmount(String(amount));
+          return `Amount set to ${amount}.`;
+        },
+      },
+      {
+        label: "Set note",
+        examples: ["note famous payment"],
+        run: ({ raw, normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^note\s+(.+)$/);
+          if (!match) return null;
+          setEntryNote(raw.slice(raw.toLowerCase().indexOf("note") + 4).trim());
+          return "Note updated.";
+        },
+      },
+      {
+        label: "Choose customer",
+        examples: ["customer pulav"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^customer\s+(.+)$/);
+          if (!match) return null;
+          const matches = (customers || []).filter((customer) =>
+            customer.name.toLowerCase().includes(match[1].trim()),
+          );
+          if (matches.length !== 1) return `I could not uniquely match ${match[1].trim()}. Please choose from the dropdown.`;
+          setEntryCustomerId(matches[0].id);
+          return `Selected customer ${matches[0].name}.`;
+        },
+      },
+    ],
+    [customers],
+  );
+
   const closeEntryDialog = () => {
     setEntryMode(null);
     setEntryAmount("");
     setEntryNote("");
+    setEntryCustomerId(null);
   };
+
+  const matchingCustomers = useMemo(() => {
+    const query = entryNote.trim().toLowerCase();
+    if (!query) return customers || [];
+    const matches = (customers || []).filter(
+      (customer) =>
+        customer.name.toLowerCase().includes(query) ||
+        customer.phone.toLowerCase().includes(query),
+    );
+    return matches.length > 0 ? matches : customers || [];
+  }, [customers, entryNote]);
 
   const handleSubmit = () => {
     if (!details) return;
@@ -88,7 +187,7 @@ export default function AccountDetails() {
 
     if (entryMode === "credit") {
       addToAccount(
-        { id: details.account.id, amount, note: entryNote || "Manual amount added" },
+        { id: details.account.id, amount, note: entryNote || "Manual amount added", customerId: entryCustomerId || undefined },
         { onSuccess, onError },
       );
       return;
@@ -123,6 +222,7 @@ export default function AccountDetails() {
   }
 
   return (
+    <>
     <div className="p-6 md:p-8 max-w-6xl mx-auto pb-24 md:pb-8 space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div className="space-y-2">
@@ -217,7 +317,7 @@ export default function AccountDetails() {
               <div className="space-y-3">
                 {txns.map((txn) => (
                   <div key={txn.id} className="rounded-xl border border-border p-4">
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
                       <div>
                         <div className={`text-sm font-semibold ${txn.type === "credit" ? "text-green-600" : "text-red-600"}`}>
                           {txn.type === "credit" ? "Added Amount" : "Spent Amount"}
@@ -226,9 +326,31 @@ export default function AccountDetails() {
                           {txn.type === "credit" ? "+" : "-"}
                           {formatCurrencyINR(Number(txn.amount || 0))}
                         </div>
+                        <div className="mt-2 text-sm text-muted-foreground">
+                          Balance after this entry:{" "}
+                          <span className="font-semibold text-foreground">
+                            {formatCurrencyINR(transactionBalanceMap.get(txn.id) ?? 0)}
+                          </span>
+                        </div>
                       </div>
                       <div className="text-sm text-muted-foreground">
-                        {txn.date ? formatDateTime(txn.date, "dd MMM, hh:mm a") : "-"}
+                        <div>{txn.date ? formatDateTime(txn.date, "dd MMM, hh:mm a") : "-"}</div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="mt-2 h-8 px-2 text-destructive hover:text-destructive"
+                          onClick={() =>
+                            setTransactionToDelete({
+                              id: txn.id,
+                              type: txn.type,
+                              amount: Number(txn.amount || 0),
+                            })
+                          }
+                        >
+                          <Trash2 className="w-4 h-4 mr-1" />
+                          Delete
+                        </Button>
                       </div>
                     </div>
                     <div className="mt-3 text-sm text-muted-foreground">
@@ -277,6 +399,26 @@ export default function AccountDetails() {
                   placeholder={entryMode === "credit" ? "Reason for adding amount" : "Reason for subtraction"}
                 />
               </div>
+              {entryMode === "credit" && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Customer to deduct from (Optional)</label>
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={entryCustomerId || ""}
+                    onChange={(e) => setEntryCustomerId(e.target.value ? Number(e.target.value) : null)}
+                  >
+                    <option value="">Do not deduct customer balance</option>
+                    {matchingCustomers.map((customer) => (
+                      <option key={customer.id} value={customer.id}>
+                        {customer.name} ({customer.phone})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Select the customer if this amount is money received from them.
+                  </p>
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button
@@ -289,6 +431,49 @@ export default function AccountDetails() {
           </form>
         </DialogContent>
       </Dialog>
+      <AlertDialog open={!!transactionToDelete} onOpenChange={(open) => !open && setTransactionToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this transaction?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will remove the selected {transactionToDelete?.type === "credit" ? "added" : "spent"} amount from this account and update the total balance.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setTransactionToDelete(null)}>Keep It</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!transactionToDelete) return;
+                deleteAccountTransaction(
+                  { id: details.account.id, transactionId: transactionToDelete.id },
+                  {
+                    onSuccess: () => {
+                      toast({
+                        title: "Transaction deleted",
+                        description: `${formatCurrencyINR(transactionToDelete.amount)} was removed from ${details.account.name}.`,
+                      });
+                      setTransactionToDelete(null);
+                    },
+                    onError: (error: Error) => {
+                      toast({ title: "Delete failed", description: error.message, variant: "destructive" });
+                    },
+                  },
+                );
+              }}
+              disabled={deletingTransaction}
+            >
+              {deletingTransaction ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+
+      <VoiceAssistant
+        title="Account Voice Helper"
+        subtitle="Use voice for add amount, note, amount, and customer selection."
+        commands={accountDetailVoiceCommands}
+      />
+    </>
   );
 }

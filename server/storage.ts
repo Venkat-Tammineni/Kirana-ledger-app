@@ -9,11 +9,12 @@ import {
   type UpdateQuotationRequest,
 } from "@shared/schema";
 import { eq, desc, sql, sum, and, inArray } from "drizzle-orm";
-import { createBillTransaction, updateBillTransaction } from "./services/billing-service";
+import { createBillTransaction, deleteBillTransaction, updateBillTransaction } from "./services/billing-service";
 import { adjustStockTransaction } from "./services/inventory-service";
 import { getISTDateKey, getISTDayBounds, getISTMonthBounds, parseISTDateTime } from "@shared/timezone";
 
 const LEDGER_TABLE_NAME = "ledger_entries";
+const MIRCHI_POWDER_ITEM_NAME = "mirchi powder";
 
 function isMissingLedgerTableError(error: unknown): boolean {
   return isMissingTableError(error, LEDGER_TABLE_NAME);
@@ -26,6 +27,16 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
   return (
     candidate.code === "42P01" &&
     candidate.message?.includes(`relation "${tableName}" does not exist`) === true
+  );
+}
+
+function isMissingColumnError(error: unknown, columnName: string): boolean {
+  if (!error || typeof error !== "object") return false;
+
+  const candidate = error as { code?: string; message?: string };
+  return (
+    candidate.code === "42703" &&
+    candidate.message?.includes(columnName) === true
   );
 }
 
@@ -53,6 +64,17 @@ type CustomerStats = {
   daysSinceLastPayment: number | null;
 };
 
+type CustomerListSummary = {
+  totalPurchased: number;
+  totalPaid: number;
+  totalProfit: number;
+  totalGiven: number;
+  totalReceived: number;
+  balance: number;
+  lastPaymentDate: string | null;
+  daysSinceLastPayment: number | null;
+};
+
 type StaffSummary = {
   presentDays: number;
   absentDays: number;
@@ -64,6 +86,11 @@ type StaffSummary = {
   todayPayment: number;
 };
 
+type MirchiPowderTotals = {
+  sales: number;
+  profit: number;
+};
+
 type InvestmentHistoryEntry = {
   id: number;
   source: "account_spent" | "manual";
@@ -72,6 +99,18 @@ type InvestmentHistoryEntry = {
   note: string | null;
   date: string;
 };
+
+function parseAccountLinkedPaymentNote(note: string | null | undefined) {
+  if (!note) return null;
+  const trimmed = note.trim();
+  const explicitMatch = trimmed.match(/^(.*)\s+\(received in (.+)\)$/i);
+  if (!explicitMatch) return null;
+
+  return {
+    accountName: explicitMatch[2].trim(),
+    accountTxnNote: explicitMatch[1].trim(),
+  };
+}
 
 export interface IStorage {
   // Staff
@@ -88,7 +127,8 @@ export interface IStorage {
   getAccountDetails(id: number): Promise<{ account: Account; currentBalance: number; totalSpent: number; transactions: AccountTransaction[] } | undefined>;
   createAccount(account: Omit<Account, "id" | "createdAt">): Promise<Account>;
   spendFromAccount(id: number, amount: number, note: string): Promise<AccountTransaction>;
-  addToAccount(id: number, amount: number, note: string): Promise<AccountTransaction>;
+  addToAccount(id: number, amount: number, note: string, customerId?: number): Promise<AccountTransaction>;
+  deleteAccountTransaction(accountId: number, transactionId: number): Promise<void>;
   deleteAccountSafe(id: number): Promise<void>;
   deleteAccountForce(id: number): Promise<void>;
   getInvestmentDetails(): Promise<{
@@ -97,7 +137,12 @@ export interface IStorage {
     manualInvestmentTotal: number;
     entries: InvestmentHistoryEntry[];
   }>;
-  createInvestmentEntry(data: { amount: number; note: string; date?: Date }): Promise<InvestmentEntry>;
+  createInvestmentEntry(data: {
+    amount: number;
+    note: string;
+    date?: Date;
+    purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>;
+  }): Promise<InvestmentEntry>;
 
   // Customers
   getCustomers(search?: string): Promise<(Customer & {
@@ -115,8 +160,10 @@ export interface IStorage {
   createCustomer(customer: Omit<Customer, "id" | "createdAt">): Promise<Customer>;
   updateCustomer(id: number, customer: Partial<Omit<Customer, "id" | "createdAt">>): Promise<Customer>;
   deleteCustomer(id: number): Promise<void>;
-  createPayment(payment: Omit<Payment, "id" | "date"> & { date?: Date }): Promise<Payment>;
+  createPayment(payment: Omit<Payment, "id" | "date"> & { date?: Date; paymentAccountId?: number }): Promise<Payment>;
+  deleteCustomerPayment(customerId: number, paymentId: number): Promise<void>;
   setCustomerTotalProfit(id: number, totalProfit: number): Promise<{ customerId: number; totalProfit: number; adjustment: number }>;
+  setCustomerDailyProfit(id: number, profitDate: Date, totalProfit: number): Promise<{ customerId: number; profitDate: string; totalProfit: number; adjustment: number }>;
   createLedgerCredit(entry: {
     customerId: number;
     amount: number;
@@ -124,6 +171,7 @@ export interface IStorage {
     billId?: number | null;
     createdAt?: Date;
   }): Promise<LedgerEntry>;
+  deleteCustomerCredit(customerId: number, entryId: number): Promise<void>;
   
   // Products
   getProducts(search?: string): Promise<Product[]>;
@@ -134,6 +182,19 @@ export interface IStorage {
   // Bills
   getBills(): Promise<(Bill & { customerName: string | null })[]>;
   getBill(id: number): Promise<(Bill & { items: BillItem[]; charges: BillCharge[]; customer: Customer | null }) | undefined>;
+  getLastBilledItemMemory(
+    customerId: number,
+    lookup: { productId?: number; name?: string },
+  ): Promise<{
+    productId: number | null;
+    name: string;
+    quantity: number;
+    unit: string;
+    price: number;
+    costPrice: number;
+    billId: number;
+    billDate: string;
+  } | null>;
   createBill(data: CreateBillRequest): Promise<Bill>;
   updateBill(id: number, data: UpdateBillRequest): Promise<Bill>;
   deleteBill(id: number): Promise<void>;
@@ -147,10 +208,25 @@ export interface IStorage {
   convertQuotationToBill(id: number): Promise<{ quotation: Quotation; bill: Bill }>;
   
   // Dashboard
-  getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; totalDue: number; activeCustomers: number }>;
+  getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; mirchiPowderSales: number; mirchiPowderProfit: number; totalDue: number; activeCustomers: number }>;
   
   // Reporting
-  getProfitReport(startDate: Date, endDate: Date): Promise<{ totalSales: number; totalProfit: number; totalInvestment: number }>;
+  getProfitReport(startDate: Date, endDate: Date): Promise<{
+    totalSales: number;
+    totalProfit: number;
+    totalInvestment: number;
+    mirchiPowderSales: number;
+    mirchiPowderProfit: number;
+    mirchiPowderInvestment: number;
+    mirchiPowderCustomers: Array<{
+      customerId: number | null;
+      customerName: string;
+      totalQuantity: number;
+      unit: string;
+      totalSales: number;
+      totalProfit: number;
+    }>;
+  }>;
   getCustomerProfitReport(startDate: Date, endDate: Date): Promise<Array<{ customerId: number | null; customerName: string; totalSales: number; totalProfit: number }>>;
   
   // Inventory/Stock
@@ -162,12 +238,224 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
+  private getMirchiPowderItemCondition() {
+    return sql`lower(trim(${billItems.name})) = ${MIRCHI_POWDER_ITEM_NAME}`;
+  }
+
+  private async getMirchiPowderTotalsForRange(startDate: Date, endDate: Date): Promise<MirchiPowderTotals> {
+    const [row] = await db
+      .select({
+        sales: sum(billItems.subtotal),
+        profit: sum(sql`(${billItems.price} - coalesce(${billItems.costPrice}, 0)) * ${billItems.quantity}`),
+      })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .where(
+        and(
+          eq(bills.status, "completed"),
+          sql`${bills.date} >= ${startDate}`,
+          sql`${bills.date} <= ${endDate}`,
+          this.getMirchiPowderItemCondition(),
+        ),
+      );
+
+    return {
+      sales: Number(row?.sales || 0),
+      profit: Number(row?.profit || 0),
+    };
+  }
+
   private toDateKey(date: Date) {
     return getISTDateKey(date);
   }
 
   private getDayBounds(date: Date) {
     return getISTDayBounds(date);
+  }
+
+  private getDaysSince(value: Date | string | null | undefined) {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
+  }
+
+  private async getCustomerListSummaries(customerIds: number[]): Promise<Map<number, CustomerListSummary>> {
+    const summaries = new Map<number, CustomerListSummary>();
+    if (customerIds.length === 0) return summaries;
+
+    const billRows = await db
+      .select({
+        customerId: bills.customerId,
+        totalPurchased: sum(bills.totalAmount),
+        totalProfit: sum(bills.totalProfit),
+      })
+      .from(bills)
+      .where(
+        and(
+          eq(bills.status, "completed"),
+          sql`${bills.customerId} IS NOT NULL`,
+          inArray(bills.customerId, customerIds),
+        ),
+      )
+      .groupBy(bills.customerId);
+
+    const paymentRows = await db
+      .select({
+        customerId: payments.customerId,
+        totalPaid: sum(payments.amount),
+        lastPaymentDate: sql<Date | null>`max(${payments.date})`,
+      })
+      .from(payments)
+      .where(inArray(payments.customerId, customerIds))
+      .groupBy(payments.customerId);
+
+    let manualCreditRows: Array<{ customerId: number; totalManualCredit: string | null }> = [];
+    try {
+      manualCreditRows = await db
+        .select({
+          customerId: ledgerEntries.customerId,
+          totalManualCredit: sum(ledgerEntries.amount),
+        })
+        .from(ledgerEntries)
+        .where(
+          and(
+            inArray(ledgerEntries.customerId, customerIds),
+            eq(ledgerEntries.type, "CREDIT"),
+            sql`${ledgerEntries.billId} IS NULL`,
+          ),
+        )
+        .groupBy(ledgerEntries.customerId);
+    } catch (error) {
+      if (!isMissingLedgerTableError(error)) throw error;
+    }
+
+    const totalProfitAdjustments = new Map<number, number>();
+    try {
+      const adjustmentRows = await db
+        .select()
+        .from(customerProfitAdjustments)
+        .where(inArray(customerProfitAdjustments.customerId, customerIds));
+
+      const rowsByCustomer = new Map<number, CustomerProfitAdjustment[]>();
+      for (const row of adjustmentRows) {
+        const existing = rowsByCustomer.get(row.customerId) ?? [];
+        existing.push(row);
+        rowsByCustomer.set(row.customerId, existing);
+      }
+
+      rowsByCustomer.forEach((rows: CustomerProfitAdjustment[], customerId: number) => {
+        const latestGlobalAdjustment = rows
+          .filter((row) => !row.profitDate)
+          .sort(
+            (a: CustomerProfitAdjustment, b: CustomerProfitAdjustment) =>
+              new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime(),
+          )[0];
+        const datedAdjustmentTotal = rows
+          .filter((row) => row.profitDate)
+          .reduce((sum: number, row: CustomerProfitAdjustment) => sum + Number(row.amount || 0), 0);
+
+        totalProfitAdjustments.set(
+          customerId,
+          Number(latestGlobalAdjustment?.amount || 0) + datedAdjustmentTotal,
+        );
+      });
+    } catch (error) {
+      if (
+        isMissingTableError(error, "customer_profit_adjustments") ||
+        isMissingColumnError(error, "profit_date")
+      ) {
+        try {
+          const legacyAdjustmentRows = await db
+            .select({
+              customerId: customerProfitAdjustments.customerId,
+              amount: customerProfitAdjustments.amount,
+              createdAt: customerProfitAdjustments.createdAt,
+            })
+            .from(customerProfitAdjustments)
+            .where(inArray(customerProfitAdjustments.customerId, customerIds))
+            .orderBy(desc(customerProfitAdjustments.createdAt), desc(customerProfitAdjustments.id));
+
+          for (const row of legacyAdjustmentRows) {
+            if (!totalProfitAdjustments.has(row.customerId)) {
+              totalProfitAdjustments.set(row.customerId, Number(row.amount || 0));
+            }
+          }
+        } catch (legacyError) {
+          if (!isMissingTableError(legacyError, "customer_profit_adjustments")) throw legacyError;
+        }
+      } else {
+        throw error;
+      }
+    }
+
+    for (const row of billRows) {
+      if (row.customerId == null) continue;
+      summaries.set(row.customerId, {
+        totalPurchased: Number(row.totalPurchased || 0),
+        totalPaid: 0,
+        totalProfit: Number(row.totalProfit || 0) + (totalProfitAdjustments.get(row.customerId) ?? 0),
+        totalGiven: Number(row.totalPurchased || 0),
+        totalReceived: 0,
+        balance: Number(row.totalPurchased || 0),
+        lastPaymentDate: null,
+        daysSinceLastPayment: null,
+      });
+    }
+
+    for (const row of paymentRows) {
+      const current = summaries.get(row.customerId) ?? {
+        totalPurchased: 0,
+        totalPaid: 0,
+        totalProfit: totalProfitAdjustments.get(row.customerId) ?? 0,
+        totalGiven: 0,
+        totalReceived: 0,
+        balance: 0,
+        lastPaymentDate: null,
+        daysSinceLastPayment: null,
+      };
+      const lastPaymentDate = row.lastPaymentDate ? new Date(row.lastPaymentDate).toISOString() : null;
+      const totalPaid = Number(row.totalPaid || 0);
+      current.totalPaid = totalPaid;
+      current.totalReceived = totalPaid;
+      current.lastPaymentDate = lastPaymentDate;
+      current.daysSinceLastPayment = this.getDaysSince(row.lastPaymentDate);
+      summaries.set(row.customerId, current);
+    }
+
+    for (const row of manualCreditRows) {
+      const current = summaries.get(row.customerId) ?? {
+        totalPurchased: 0,
+        totalPaid: 0,
+        totalProfit: totalProfitAdjustments.get(row.customerId) ?? 0,
+        totalGiven: 0,
+        totalReceived: 0,
+        balance: 0,
+        lastPaymentDate: null,
+        daysSinceLastPayment: null,
+      };
+      current.totalGiven += Number(row.totalManualCredit || 0);
+      summaries.set(row.customerId, current);
+    }
+
+    for (const customerId of customerIds) {
+      const current = summaries.get(customerId) ?? {
+        totalPurchased: 0,
+        totalPaid: 0,
+        totalProfit: totalProfitAdjustments.get(customerId) ?? 0,
+        totalGiven: 0,
+        totalReceived: 0,
+        balance: 0,
+        lastPaymentDate: null,
+        daysSinceLastPayment: null,
+      };
+      current.totalGiven = current.totalPurchased + (current.totalGiven - current.totalPurchased);
+      current.totalReceived = current.totalPaid;
+      current.balance = current.totalGiven - current.totalReceived;
+      summaries.set(customerId, current);
+    }
+
+    return summaries;
   }
 
   private async getAttendanceRows(staffId: number): Promise<StaffAttendance[]> {
@@ -440,10 +728,17 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  async addToAccount(id: number, amount: number, note: string): Promise<AccountTransaction> {
+  async addToAccount(id: number, amount: number, note: string, customerId?: number): Promise<AccountTransaction> {
     return db.transaction(async (tx) => {
       const [account] = await tx.select().from(accounts).where(eq(accounts.id, id));
       if (!account) throw new Error("Account not found");
+
+      let customerName: string | null = null;
+      if (customerId) {
+        const [customer] = await tx.select().from(customers).where(eq(customers.id, customerId));
+        if (!customer) throw new Error("Customer not found");
+        customerName = customer.name;
+      }
 
       const [txn] = await tx.insert(accountTransactions).values({
         accountId: id,
@@ -452,7 +747,97 @@ export class DatabaseStorage implements IStorage {
         note,
       }).returning();
 
+      if (customerId) {
+        const paymentDate = new Date();
+        const paymentNote = note?.trim()
+          ? `${note.trim()} (received in ${account.name})`
+          : `Received in ${account.name}${customerName ? ` from ${customerName}` : ""}`;
+
+        await tx.insert(payments).values({
+          customerId,
+          billId: null,
+          amount: amount.toString(),
+          note: paymentNote,
+          date: paymentDate,
+        });
+
+        try {
+          await tx.insert(ledgerEntries).values({
+            customerId,
+            type: "PAYMENT",
+            amount: amount.toString(),
+            note: paymentNote,
+            billId: null,
+            createdAt: paymentDate,
+          });
+        } catch (error) {
+          if (!isMissingLedgerTableError(error)) throw error;
+        }
+      }
+
       return txn;
+    });
+  }
+
+  async deleteAccountTransaction(accountId: number, transactionId: number): Promise<void> {
+    await db.transaction(async (tx) => {
+      const [account] = await tx.select().from(accounts).where(eq(accounts.id, accountId));
+      if (!account) throw new Error("Account not found");
+
+      const [txn] = await tx
+        .select()
+        .from(accountTransactions)
+        .where(and(eq(accountTransactions.id, transactionId), eq(accountTransactions.accountId, accountId)));
+
+      if (!txn) throw new Error("Transaction not found");
+
+      if (txn.type === "credit" && txn.note?.trim()) {
+        const linkedPaymentNote = `${txn.note.trim()} (received in ${account.name})`;
+        const matchingPayments = await tx
+          .select()
+          .from(payments)
+          .where(and(eq(payments.amount, txn.amount), eq(payments.note, linkedPaymentNote)));
+
+        if (matchingPayments.length > 0) {
+          const txnDateValue = txn.date ? new Date(txn.date).getTime() : Number.POSITIVE_INFINITY;
+          const paymentToDelete = matchingPayments.reduce((closest, current) => {
+            const currentDistance = Math.abs(new Date(current.date ?? 0).getTime() - txnDateValue);
+            const closestDistance = Math.abs(new Date(closest.date ?? 0).getTime() - txnDateValue);
+            return currentDistance < closestDistance ? current : closest;
+          });
+
+          await tx.delete(payments).where(eq(payments.id, paymentToDelete.id));
+
+          try {
+            const matchingLedgerEntries = await tx
+              .select()
+              .from(ledgerEntries)
+              .where(
+                and(
+                  eq(ledgerEntries.customerId, paymentToDelete.customerId),
+                  eq(ledgerEntries.type, "PAYMENT"),
+                  eq(ledgerEntries.amount, paymentToDelete.amount),
+                  eq(ledgerEntries.note, linkedPaymentNote),
+                  sql`${ledgerEntries.billId} IS NULL`,
+                ),
+              );
+
+            if (matchingLedgerEntries.length > 0) {
+              const ledgerToDelete = matchingLedgerEntries.reduce((closest, current) => {
+                const currentDistance = Math.abs(new Date(current.createdAt ?? 0).getTime() - txnDateValue);
+                const closestDistance = Math.abs(new Date(closest.createdAt ?? 0).getTime() - txnDateValue);
+                return currentDistance < closestDistance ? current : closest;
+              });
+
+              await tx.delete(ledgerEntries).where(eq(ledgerEntries.id, ledgerToDelete.id));
+            }
+          } catch (error) {
+            if (!isMissingLedgerTableError(error)) throw error;
+          }
+        }
+      }
+
+      await tx.delete(accountTransactions).where(eq(accountTransactions.id, transactionId));
     });
   }
 
@@ -540,16 +925,58 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async createInvestmentEntry(data: { amount: number; note: string; date?: Date }): Promise<InvestmentEntry> {
-    const [entry] = await db
-      .insert(investmentEntries)
-      .values({
-        amount: data.amount.toFixed(2),
-        note: data.note,
-        date: data.date || new Date(),
-      })
-      .returning();
-    return entry;
+  async createInvestmentEntry(data: {
+    amount: number;
+    note: string;
+    date?: Date;
+    purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>;
+  }): Promise<InvestmentEntry> {
+    return db.transaction(async (tx) => {
+      const purchaseLines = (data.purchases || []).filter((item) => item.quantity > 0);
+      const productRows = purchaseLines.length
+        ? await tx
+            .select({ id: products.id, name: products.name })
+            .from(products)
+            .where(inArray(products.id, purchaseLines.map((item) => item.productId)))
+        : [];
+      const productNameMap = new Map(productRows.map((row) => [row.id, row.name]));
+      const purchaseSummary = purchaseLines.length
+        ? purchaseLines
+            .map((item) => {
+              const name = productNameMap.get(item.productId) || `Product ${item.productId}`;
+              return `${name} ${item.quantity}${item.costPrice !== undefined ? ` @ ${item.costPrice}` : ""}`;
+            })
+            .join(", ")
+        : "";
+
+      const [entry] = await tx
+        .insert(investmentEntries)
+        .values({
+          amount: data.amount.toFixed(2),
+          note: purchaseSummary ? `${data.note} | Items: ${purchaseSummary}` : data.note,
+          date: data.date || new Date(),
+        })
+        .returning();
+
+      for (const purchase of purchaseLines) {
+        if (purchase.costPrice !== undefined) {
+          await tx
+            .update(products)
+            .set({ costPrice: purchase.costPrice.toFixed(3) })
+            .where(eq(products.id, purchase.productId));
+        }
+
+        await adjustStockTransaction(
+          tx as any,
+          purchase.productId,
+          Math.round(purchase.quantity),
+          "purchase",
+          data.note,
+        );
+      }
+
+      return entry;
+    });
   }
 
   async getCustomers(search?: string): Promise<(Customer & {
@@ -562,21 +989,23 @@ export class DatabaseStorage implements IStorage {
   })[]> {
     const whereClause = search ? sql`name ILIKE ${`%${search}%`} OR phone ILIKE ${`%${search}%`}` : undefined;
     const allCustomers = await db.select().from(customers).where(whereClause);
-    
-    const results = await Promise.all(allCustomers.map(async (c) => {
-      const stats = await this.getCustomerStats(c.id);
-      return {
-        ...c,
-        balance: stats.balance,
-        totalProfit: stats.totalProfit,
-        totalGiven: stats.totalGiven,
-        totalReceived: stats.totalReceived,
-        lastPaymentDate: stats.lastPaymentDate,
-        daysSinceLastPayment: stats.daysSinceLastPayment,
-      };
-    }));
-    
-    return results.sort((a, b) => b.balance - a.balance); 
+
+    const summaryMap = await this.getCustomerListSummaries(allCustomers.map((customer) => customer.id));
+
+    return allCustomers
+      .map((customer) => {
+        const summary = summaryMap.get(customer.id);
+        return {
+          ...customer,
+          balance: summary?.balance ?? 0,
+          totalProfit: summary?.totalProfit ?? 0,
+          totalGiven: summary?.totalGiven ?? 0,
+          totalReceived: summary?.totalReceived ?? 0,
+          lastPaymentDate: summary?.lastPaymentDate ?? null,
+          daysSinceLastPayment: summary?.daysSinceLastPayment ?? null,
+        };
+      })
+      .sort((a, b) => b.balance - a.balance);
   }
 
   async getCustomer(id: number): Promise<Customer | undefined> {
@@ -647,24 +1076,63 @@ export class DatabaseStorage implements IStorage {
         )
       : null;
 
-    let profitAdjustment = 0;
-    try {
-      const adjustmentRows: CustomerProfitAdjustment[] = await db.select()
-        .from(customerProfitAdjustments)
-        .where(eq(customerProfitAdjustments.customerId, id))
-        .orderBy(desc(customerProfitAdjustments.createdAt), desc(customerProfitAdjustments.id))
-        .limit(1);
-      profitAdjustment = Number(adjustmentRows[0]?.amount || 0);
-    } catch (error) {
-      if (!isMissingTableError(error, "customer_profit_adjustments")) throw error;
-    }
+      let totalProfitAdjustment = 0;
+      let dailyProfitAdjustment = 0;
+      try {
+        const adjustmentRows: CustomerProfitAdjustment[] = await db.select()
+          .from(customerProfitAdjustments)
+          .where(eq(customerProfitAdjustments.customerId, id));
+
+        const latestGlobalAdjustment = adjustmentRows
+          .filter((row) => !row.profitDate)
+          .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())[0];
+
+        const latestDailyAdjustment = adjustmentRows
+          .filter((row) => {
+            if (!row.profitDate) return false;
+            const rowDate = new Date(row.profitDate);
+            return rowDate >= profitRangeStart && rowDate <= profitRangeEnd;
+          })
+          .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())[0];
+
+        totalProfitAdjustment =
+          Number(latestGlobalAdjustment?.amount || 0) +
+          adjustmentRows
+            .filter((row) => row.profitDate)
+            .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+        dailyProfitAdjustment = Number(latestDailyAdjustment?.amount || 0);
+      } catch (error) {
+        if (
+          isMissingTableError(error, "customer_profit_adjustments") ||
+          isMissingColumnError(error, "profit_date")
+        ) {
+          try {
+            const legacyAdjustmentRows = await db
+              .select({
+                amount: customerProfitAdjustments.amount,
+                createdAt: customerProfitAdjustments.createdAt,
+              })
+              .from(customerProfitAdjustments)
+              .where(eq(customerProfitAdjustments.customerId, id))
+              .orderBy(desc(customerProfitAdjustments.createdAt), desc(customerProfitAdjustments.id))
+              .limit(1);
+
+            totalProfitAdjustment = Number(legacyAdjustmentRows[0]?.amount || 0);
+            dailyProfitAdjustment = 0;
+          } catch (legacyError) {
+            if (!isMissingTableError(legacyError, "customer_profit_adjustments")) throw legacyError;
+          }
+        } else {
+          throw error;
+        }
+      }
     
     return {
       totalPurchased,
       totalPaid,
       balance: totalGiven - totalReceived,
-      totalProfit: baseTotalProfit + profitAdjustment,
-      todayProfit,
+        totalProfit: baseTotalProfit + totalProfitAdjustment,
+        todayProfit: todayProfit + dailyProfitAdjustment,
       selectedProfitDate: selectedProfitDate.toISOString(),
       totalGiven,
       totalReceived,
@@ -803,14 +1271,36 @@ export class DatabaseStorage implements IStorage {
     await db.delete(customers).where(eq(customers.id, id));
   }
 
-  async createPayment(data: Omit<Payment, "id" | "date"> & { date?: Date }): Promise<Payment> {
+  async createPayment(data: Omit<Payment, "id" | "date"> & { date?: Date; paymentAccountId?: number }): Promise<Payment> {
     return db.transaction(async (tx) => {
       const paymentDate = data.date || new Date();
+      let paymentNote = data.note ?? null;
+
+      if (data.paymentAccountId) {
+        const [account] = await tx.select().from(accounts).where(eq(accounts.id, data.paymentAccountId));
+        if (!account) throw new Error("Selected account not found");
+
+        const [customer] = await tx.select().from(customers).where(eq(customers.id, data.customerId));
+        if (!customer) throw new Error("Customer not found");
+
+        paymentNote = paymentNote?.trim()
+          ? `${paymentNote.trim()} (received in ${account.name})`
+          : `Received in ${account.name} from ${customer.name}`;
+
+        await tx.insert(accountTransactions).values({
+          accountId: account.id,
+          type: "credit",
+          amount: data.amount.toString(),
+          note: paymentNote,
+          date: paymentDate,
+        });
+      }
+
       const [payment] = await tx.insert(payments).values({
         customerId: data.customerId,
         billId: data.billId ?? null,
         amount: data.amount.toString(),
-        note: data.note ?? null,
+        note: paymentNote,
         date: paymentDate,
       }).returning();
 
@@ -819,7 +1309,7 @@ export class DatabaseStorage implements IStorage {
           customerId: data.customerId,
           type: "PAYMENT",
           amount: data.amount.toString(),
-          note: data.note ?? null,
+          note: paymentNote,
           billId: data.billId ?? null,
           createdAt: paymentDate,
         });
@@ -828,6 +1318,69 @@ export class DatabaseStorage implements IStorage {
       }
 
       return payment;
+    });
+  }
+
+  async deleteCustomerPayment(customerId: number, paymentId: number): Promise<void> {
+    await db.transaction(async (tx) => {
+      const [payment] = await tx
+        .select()
+        .from(payments)
+        .where(and(eq(payments.id, paymentId), eq(payments.customerId, customerId)));
+
+      if (!payment) throw new Error("Payment not found");
+      if (payment.billId) throw new Error("Bill-linked payments must be changed from the bill itself");
+
+      const accountLink = parseAccountLinkedPaymentNote(payment.note);
+      if (accountLink) {
+        const [account] = await tx.select().from(accounts).where(eq(accounts.name, accountLink.accountName));
+        if (account) {
+          const matchingTransactions = await tx
+            .select()
+            .from(accountTransactions)
+            .where(
+              and(
+                eq(accountTransactions.accountId, account.id),
+                eq(accountTransactions.type, "credit"),
+                eq(accountTransactions.amount, payment.amount),
+                eq(accountTransactions.note, accountLink.accountTxnNote),
+              ),
+            );
+
+          if (matchingTransactions.length > 0) {
+            const paymentDateValue = payment.date ? new Date(payment.date).getTime() : Number.POSITIVE_INFINITY;
+            const txnToDelete = matchingTransactions.reduce((closest, current) => {
+              const currentDistance = Math.abs(new Date(current.date ?? 0).getTime() - paymentDateValue);
+              const closestDistance = Math.abs(new Date(closest.date ?? 0).getTime() - paymentDateValue);
+              return currentDistance < closestDistance ? current : closest;
+            });
+
+            await tx.delete(accountTransactions).where(eq(accountTransactions.id, txnToDelete.id));
+          }
+        }
+      }
+
+      try {
+        const noteCondition =
+          payment.note == null
+            ? sql`${ledgerEntries.note} IS NULL`
+            : eq(ledgerEntries.note, payment.note);
+        await tx
+          .delete(ledgerEntries)
+          .where(
+            and(
+              eq(ledgerEntries.customerId, customerId),
+              eq(ledgerEntries.type, "PAYMENT"),
+              eq(ledgerEntries.amount, payment.amount),
+              noteCondition,
+              sql`${ledgerEntries.billId} IS NULL`,
+            ),
+          );
+      } catch (error) {
+        if (!isMissingLedgerTableError(error)) throw error;
+      }
+
+      await tx.delete(payments).where(eq(payments.id, paymentId));
     });
   }
 
@@ -840,13 +1393,21 @@ export class DatabaseStorage implements IStorage {
     const adjustment = totalProfit - baseTotalProfit;
 
     try {
-      await db.transaction(async (tx) => {
-        await tx.delete(customerProfitAdjustments).where(eq(customerProfitAdjustments.customerId, id));
-        await tx.insert(customerProfitAdjustments).values({
-          customerId: id,
-          amount: adjustment.toFixed(2),
+        await db.transaction(async (tx) => {
+          await tx
+            .delete(customerProfitAdjustments)
+            .where(
+              and(
+                eq(customerProfitAdjustments.customerId, id),
+                sql`${customerProfitAdjustments.profitDate} IS NULL`,
+              ),
+            );
+          await tx.insert(customerProfitAdjustments).values({
+            customerId: id,
+            amount: adjustment.toFixed(2),
+            profitDate: null,
+          });
         });
-      });
     } catch (error) {
       if (isMissingTableError(error, "customer_profit_adjustments")) {
         throw new Error("Profit edit requires a database update. Run npm run db:push.");
@@ -854,8 +1415,56 @@ export class DatabaseStorage implements IStorage {
       throw error;
     }
 
+      return {
+        customerId: id,
+        totalProfit,
+        adjustment,
+      };
+    }
+
+  async setCustomerDailyProfit(id: number, profitDate: Date, totalProfit: number): Promise<{ customerId: number; profitDate: string; totalProfit: number; adjustment: number }> {
+    const { start, end } = this.getDayBounds(profitDate);
+    const profitSum = await db.select({ value: sum(bills.totalProfit) })
+      .from(bills)
+      .where(
+        and(
+          eq(bills.customerId, id),
+          eq(bills.status, 'completed'),
+          sql`${bills.date} >= ${start}`,
+          sql`${bills.date} <= ${end}`,
+        ),
+      );
+
+    const baseDailyProfit = Number(profitSum[0]?.value || 0);
+    const adjustment = totalProfit - baseDailyProfit;
+
+    try {
+      await db.transaction(async (tx) => {
+        await tx
+          .delete(customerProfitAdjustments)
+          .where(
+            and(
+              eq(customerProfitAdjustments.customerId, id),
+              sql`${customerProfitAdjustments.profitDate} >= ${start}`,
+              sql`${customerProfitAdjustments.profitDate} <= ${end}`,
+            ),
+          );
+        await tx.insert(customerProfitAdjustments).values({
+          customerId: id,
+          amount: adjustment.toFixed(2),
+          profitDate: start,
+        });
+      });
+    } catch (error) {
+      if (isMissingTableError(error, "customer_profit_adjustments")) {
+        throw new Error("Day-wise profit edit requires a database update. Run npm run db:push.");
+      }
+      throw error;
+    }
+
     return {
       customerId: id,
+      profitDate: start.toISOString(),
       totalProfit,
       adjustment,
     };
@@ -885,7 +1494,32 @@ export class DatabaseStorage implements IStorage {
       throw error;
     }
 
-    return ledgerEntry[0];
+      return ledgerEntry[0];
+    }
+
+  async deleteCustomerCredit(customerId: number, entryId: number): Promise<void> {
+    try {
+      const [entry] = await db
+        .select()
+        .from(ledgerEntries)
+        .where(
+          and(
+            eq(ledgerEntries.id, entryId),
+            eq(ledgerEntries.customerId, customerId),
+            eq(ledgerEntries.type, "CREDIT"),
+            sql`${ledgerEntries.billId} IS NULL`,
+          ),
+        );
+
+      if (!entry) throw new Error("Credit entry not found");
+
+      await db.delete(ledgerEntries).where(eq(ledgerEntries.id, entryId));
+    } catch (error) {
+      if (isMissingLedgerTableError(error)) {
+        throw new Error("Ledger feature requires a database update. Run npm run db:push.");
+      }
+      throw error;
+    }
   }
 
   async getProducts(search?: string): Promise<Product[]> {
@@ -893,19 +1527,43 @@ export class DatabaseStorage implements IStorage {
       return db
         .select()
         .from(products)
-        .where(and(eq(products.isActive, true), sql`name ILIKE ${`%${search}%`}`));
+        .where(and(eq(products.isActive, true), sql`name ILIKE ${`%${search}%`}`))
+        .orderBy(sql`lower(${products.name})`, products.id);
     }
-    return db.select().from(products).where(eq(products.isActive, true)).limit(50);
+    return db
+      .select()
+      .from(products)
+      .where(eq(products.isActive, true))
+      .orderBy(sql`lower(${products.name})`, products.id);
   }
 
   async createProduct(data: Omit<Product, "id">): Promise<Product> {
+    const trimmedName = data.name.trim();
+    const trimmedSku = data.sku?.trim() || null;
+    const normalizedName = trimmedName.toLowerCase();
+    const [existingProduct] = await db
+      .select()
+      .from(products)
+      .where(
+        and(
+          eq(products.isActive, true),
+          sql`lower(${products.name}) = ${normalizedName}`,
+        ),
+      );
+
+    if (existingProduct) {
+      throw new Error("A product with this name already exists");
+    }
+
     const [product] = await db.insert(products).values({
       ...data,
+      name: trimmedName,
       price: data.price?.toString(),
       costPrice: data.costPrice?.toString() || "0",
       primaryUnit: data.primaryUnit || "PCS",
       secondaryUnit: data.secondaryUnit ?? null,
       unitConversion: data.unitConversion ?? null,
+      sku: trimmedSku,
       stock: data.stock ?? 0,
       lowStockThreshold: data.lowStockThreshold ?? 10,
     }).returning();
@@ -914,26 +1572,68 @@ export class DatabaseStorage implements IStorage {
 
   async updateProduct(id: number, data: Partial<Omit<Product, "id">>): Promise<Product> {
     const updateData: any = {};
-    if (data.name !== undefined) updateData.name = data.name;
+    if (data.name !== undefined) {
+      const trimmedName = data.name.trim();
+      const normalizedName = trimmedName.toLowerCase();
+      const [existingProduct] = await db
+        .select()
+        .from(products)
+        .where(
+          and(
+            eq(products.isActive, true),
+            sql`lower(${products.name}) = ${normalizedName}`,
+            sql`${products.id} <> ${id}`,
+          ),
+        );
+
+      if (existingProduct) {
+        throw new Error("A product with this name already exists");
+      }
+
+      updateData.name = trimmedName;
+    }
     // `Product.price` / `costPrice` are `string | null` in the inferred select type.
     // Guard against null before calling `.toString()`.
-    if (data.price != null) updateData.price = data.price.toString();
-    if (data.costPrice != null) updateData.costPrice = data.costPrice.toString();
+    if (data.price != null) {
+      const price = Number(data.price);
+      if (!Number.isFinite(price) || price < 0) {
+        throw new Error("Invalid selling price");
+      }
+      updateData.price = price.toString();
+    }
+    if (data.costPrice != null) {
+      const costPrice = Number(data.costPrice);
+      if (!Number.isFinite(costPrice) || costPrice < 0) {
+        throw new Error("Invalid cost price");
+      }
+      updateData.costPrice = costPrice.toString();
+    }
     if (data.primaryUnit !== undefined) updateData.primaryUnit = data.primaryUnit;
     if (data.secondaryUnit !== undefined) updateData.secondaryUnit = data.secondaryUnit ?? null;
     if (data.unitConversion !== undefined) updateData.unitConversion = data.unitConversion ?? null;
-    if (data.sku !== undefined) updateData.sku = data.sku;
+    if (data.sku !== undefined) updateData.sku = data.sku?.trim() || null;
     if (data.isActive !== undefined) updateData.isActive = data.isActive;
     if (data.stock !== undefined) updateData.stock = data.stock;
     if (data.lowStockThreshold !== undefined) updateData.lowStockThreshold = data.lowStockThreshold;
     
     const [product] = await db.update(products).set(updateData).where(eq(products.id, id)).returning();
+    if (!product) {
+      throw new Error("Product not found");
+    }
     return product;
   }
 
   async deleteProduct(id: number): Promise<void> {
     // Soft-delete so historical bills referencing this product remain valid.
-    await db.update(products).set({ isActive: false }).where(eq(products.id, id));
+    const [product] = await db
+      .update(products)
+      .set({ isActive: false })
+      .where(eq(products.id, id))
+      .returning({ id: products.id });
+
+    if (!product) {
+      throw new Error("Product not found");
+    }
   }
 
   async getQuotations(): Promise<(Quotation & { customerName: string | null })[]> {
@@ -1261,6 +1961,61 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async getLastBilledItemMemory(
+    customerId: number,
+    lookup: { productId?: number; name?: string },
+  ): Promise<{
+    productId: number | null;
+    name: string;
+    quantity: number;
+    unit: string;
+    price: number;
+    costPrice: number;
+    billId: number;
+    billDate: string;
+  } | null> {
+    const trimmedName = lookup.name?.trim();
+    if (!lookup.productId && !trimmedName) return null;
+
+    const filters = [
+      eq(bills.customerId, customerId),
+      eq(bills.status, "completed"),
+      lookup.productId
+        ? eq(billItems.productId, lookup.productId)
+        : sql`lower(${billItems.name}) = lower(${trimmedName as string})`,
+    ];
+
+    const [latestItem] = await db
+      .select({
+        productId: billItems.productId,
+        name: billItems.name,
+        quantity: billItems.quantity,
+        unit: billItems.unit,
+        price: billItems.price,
+        costPrice: billItems.costPrice,
+        billId: billItems.billId,
+        billDate: bills.date,
+      })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .where(and(...filters))
+      .orderBy(desc(bills.date), desc(billItems.id))
+      .limit(1);
+
+    if (!latestItem?.billDate) return null;
+
+    return {
+      productId: latestItem.productId ?? null,
+      name: latestItem.name,
+      quantity: Number(latestItem.quantity || 0),
+      unit: latestItem.unit || "PCS",
+      price: Number(latestItem.price || 0),
+      costPrice: Number(latestItem.costPrice || 0),
+      billId: latestItem.billId,
+      billDate: latestItem.billDate.toISOString(),
+    };
+  }
+
   async createBill(data: CreateBillRequest): Promise<Bill> {
     return createBillTransaction(db as any, data);
   }
@@ -1270,12 +2025,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteBill(id: number): Promise<void> {
-    await db.update(bills).set({ status: 'voided' }).where(eq(bills.id, id));
+    await deleteBillTransaction(db as any, id);
   }
 
-  async getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; totalDue: number; activeCustomers: number }> {
+  async getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; mirchiPowderSales: number; mirchiPowderProfit: number; totalDue: number; activeCustomers: number }> {
     const { start: todayStart, end: todayEnd } = this.getDayBounds(new Date());
-    
+
     const salesRes = await db.select({ value: sum(bills.totalAmount) })
       .from(bills)
       .where(and(eq(bills.status, 'completed'), sql`${bills.date} >= ${todayStart}`, sql`${bills.date} <= ${todayEnd}`));
@@ -1283,17 +2038,21 @@ export class DatabaseStorage implements IStorage {
     const profitRes = await db.select({ value: sum(bills.totalProfit) })
       .from(bills)
       .where(and(eq(bills.status, 'completed'), sql`${bills.date} >= ${todayStart}`, sql`${bills.date} <= ${todayEnd}`));
+    const mirchiPowderTotals = await this.getMirchiPowderTotalsForRange(todayStart, todayEnd);
 
-    const customerSummaries = await this.getCustomers();
-    const customersCount = await db.select({ count: sql<number>`count(*)` }).from(customers);
+    const customerRows = await db.select({ id: customers.id }).from(customers);
+    const customerSummaries = await this.getCustomerListSummaries(customerRows.map((customer) => customer.id));
+    const totalDue = Array.from(customerSummaries.values())
+      .filter((customer) => Number(customer.balance || 0) > 0)
+      .reduce((sum, customer) => sum + Number(customer.balance || 0), 0);
 
     return {
-      todaySales: Number(salesRes[0]?.value || 0),
-      todayProfit: Number(profitRes[0]?.value || 0),
-      totalDue: customerSummaries
-        .filter((customer) => Number(customer.balance || 0) > 0)
-        .reduce((sum, customer) => sum + Number(customer.balance || 0), 0),
-      activeCustomers: Number(customersCount[0]?.count || 0)
+      todaySales: Number(salesRes[0]?.value || 0) - mirchiPowderTotals.sales,
+      todayProfit: Number(profitRes[0]?.value || 0) - mirchiPowderTotals.profit,
+      mirchiPowderSales: mirchiPowderTotals.sales,
+      mirchiPowderProfit: mirchiPowderTotals.profit,
+      totalDue,
+      activeCustomers: customerRows.length,
     };
   }
 
@@ -1374,7 +2133,22 @@ export class DatabaseStorage implements IStorage {
     }));
   }
 
-  async getProfitReport(startDate: Date, endDate: Date): Promise<{ totalSales: number; totalProfit: number; totalInvestment: number }> {
+  async getProfitReport(startDate: Date, endDate: Date): Promise<{
+    totalSales: number;
+    totalProfit: number;
+    totalInvestment: number;
+    mirchiPowderSales: number;
+    mirchiPowderProfit: number;
+    mirchiPowderInvestment: number;
+    mirchiPowderCustomers: Array<{
+      customerId: number | null;
+      customerName: string;
+      totalQuantity: number;
+      unit: string;
+      totalSales: number;
+      totalProfit: number;
+    }>;
+  }> {
     // Get all completed bills in date range
     const billsInRange = await db.select()
       .from(bills)
@@ -1385,23 +2159,57 @@ export class DatabaseStorage implements IStorage {
           sql`${bills.date} <= ${endDate}`
         )
       );
+    const mirchiPowderTotals = await this.getMirchiPowderTotalsForRange(startDate, endDate);
 
-    const totalSales = billsInRange.reduce((sum, bill) => sum + Number(bill.totalAmount || 0), 0);
-    const totalProfit = billsInRange.reduce((sum, bill) => sum + Number(bill.totalProfit || 0), 0);
+    const totalSales = billsInRange.reduce((sum, bill) => sum + Number(bill.totalAmount || 0), 0) - mirchiPowderTotals.sales;
+    const totalProfit = billsInRange.reduce((sum, bill) => sum + Number(bill.totalProfit || 0), 0) - mirchiPowderTotals.profit;
     
     // Calculate total investment (cost of goods sold)
     // Investment = Total Sales - Total Profit
     const totalInvestment = totalSales - totalProfit;
+    const mirchiPowderInvestment = mirchiPowderTotals.sales - mirchiPowderTotals.profit;
+    const mirchiPowderCustomers = await db.select({
+      customerId: bills.customerId,
+      customerName: customers.name,
+      totalQuantity: sum(billItems.quantity),
+      unit: billItems.unit,
+      totalSales: sum(billItems.subtotal),
+      totalProfit: sum(sql`(${billItems.price} - coalesce(${billItems.costPrice}, 0)) * ${billItems.quantity}`),
+    })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(customers, eq(bills.customerId, customers.id))
+      .where(
+        and(
+          eq(bills.status, 'completed'),
+          sql`${bills.date} >= ${startDate}`,
+          sql`${bills.date} <= ${endDate}`,
+          this.getMirchiPowderItemCondition(),
+        ),
+      )
+      .groupBy(bills.customerId, customers.name, billItems.unit)
+      .orderBy(desc(sum(billItems.quantity)));
 
     return {
       totalSales,
       totalProfit,
       totalInvestment,
+      mirchiPowderSales: mirchiPowderTotals.sales,
+      mirchiPowderProfit: mirchiPowderTotals.profit,
+      mirchiPowderInvestment,
+      mirchiPowderCustomers: mirchiPowderCustomers.map((row) => ({
+        customerId: row.customerId,
+        customerName: row.customerName || "Walk-in Customer",
+        totalQuantity: Number(row.totalQuantity || 0),
+        unit: row.unit || "PCS",
+        totalSales: Number(row.totalSales || 0),
+        totalProfit: Number(row.totalProfit || 0),
+      })),
     };
   }
 
   async getCustomerProfitReport(startDate: Date, endDate: Date): Promise<Array<{ customerId: number | null; customerName: string; totalSales: number; totalProfit: number }>> {
-    const results = await db.select({
+    const totalsByCustomer = await db.select({
       customerId: bills.customerId,
       customerName: customers.name,
       totalSales: sum(bills.totalAmount),
@@ -1419,12 +2227,42 @@ export class DatabaseStorage implements IStorage {
       .groupBy(bills.customerId, customers.name)
       .orderBy(desc(sum(bills.totalProfit)));
 
-    return results.map(r => ({
-      customerId: r.customerId,
-      customerName: r.customerName || 'Walk-in Customer',
-      totalSales: Number(r.totalSales || 0),
-      totalProfit: Number(r.totalProfit || 0),
-    }));
+    const mirchiPowderByCustomer = await db.select({
+      customerId: bills.customerId,
+      mirchiPowderSales: sum(billItems.subtotal),
+      mirchiPowderProfit: sum(sql`(${billItems.price} - coalesce(${billItems.costPrice}, 0)) * ${billItems.quantity}`),
+    })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .where(
+        and(
+          eq(bills.status, 'completed'),
+          sql`${bills.date} >= ${startDate}`,
+          sql`${bills.date} <= ${endDate}`,
+          this.getMirchiPowderItemCondition(),
+        ),
+      )
+      .groupBy(bills.customerId);
+
+    const mirchiPowderTotalsByCustomer = new Map(
+      mirchiPowderByCustomer.map((row) => [
+        row.customerId ?? "walk-in",
+        {
+          sales: Number(row.mirchiPowderSales || 0),
+          profit: Number(row.mirchiPowderProfit || 0),
+        },
+      ]),
+    );
+
+    return totalsByCustomer.map(r => {
+      const mirchiPowderTotals = mirchiPowderTotalsByCustomer.get(r.customerId ?? "walk-in") ?? { sales: 0, profit: 0 };
+      return {
+        customerId: r.customerId,
+        customerName: r.customerName || 'Walk-in Customer',
+        totalSales: Number(r.totalSales || 0) - mirchiPowderTotals.sales,
+        totalProfit: Number(r.totalProfit || 0) - mirchiPowderTotals.profit,
+      };
+    });
   }
 }
 

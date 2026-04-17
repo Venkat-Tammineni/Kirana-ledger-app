@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
 import { ArrowLeft, Landmark, Plus, ReceiptText } from "lucide-react";
-import { useAddInvestment, useInvestmentDetails } from "@/hooks/use-pos";
+import { useAddInvestment, useInvestmentDetails, useProducts } from "@/hooks/use-pos";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -9,11 +9,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrencyINR, formatDate, formatDateTime, toISTDateInputValue } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
 import { getISTDateKey, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
+import { getBaseUnit } from "@shared/units";
 
 type InvestmentSourceFilter = "all" | "account_spent" | "manual";
+type PurchaseRow = { productId: string; quantity: string; costPrice: string };
+
+const emptyPurchaseRow = (): PurchaseRow => ({
+  productId: "",
+  quantity: "",
+  costPrice: "",
+});
 
 export default function AccountInvestmentDetails() {
   const { data: details, isLoading } = useInvestmentDetails();
+  const { data: products } = useProducts();
   const { mutate: addInvestment, isPending: addingInvestment } = useAddInvestment();
   const { toast } = useToast();
 
@@ -21,9 +30,21 @@ export default function AccountInvestmentDetails() {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState("");
+  const [purchases, setPurchases] = useState<PurchaseRow[]>([emptyPurchaseRow()]);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [sourceFilter, setSourceFilter] = useState<InvestmentSourceFilter>("all");
+
+  const purchaseTotal = useMemo(
+    () =>
+      purchases.reduce((sum, item) => {
+        const quantity = Number(item.quantity || 0);
+        const costPrice = Number(item.costPrice || 0);
+        if (quantity <= 0 || costPrice < 0) return sum;
+        return sum + quantity * costPrice;
+      }, 0),
+    [purchases],
+  );
 
   const filteredEntries = useMemo(() => {
     if (!details) return [];
@@ -65,6 +86,30 @@ export default function AccountInvestmentDetails() {
 
   const handleAddInvestment = () => {
     const numericAmount = Number(amount);
+    const hasIncompletePurchase = purchases.some((item) => {
+      const hasAnyValue = item.productId || item.quantity || item.costPrice;
+      if (!hasAnyValue) return false;
+      if (!item.productId || !item.quantity) return true;
+      return Number(item.quantity) <= 0 || (item.costPrice.trim() !== "" && Number(item.costPrice) < 0);
+    });
+
+    if (hasIncompletePurchase) {
+      toast({
+        title: "Complete purchase rows",
+        description: "Each selected item needs a product and quantity. Rate is optional.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const normalizedPurchases = purchases
+      .map((item) => ({
+        productId: Number(item.productId),
+        quantity: Number(item.quantity),
+        costPrice: item.costPrice.trim() === "" ? undefined : Number(item.costPrice),
+      }))
+      .filter((item) => item.productId > 0 && item.quantity > 0 && (item.costPrice === undefined || item.costPrice >= 0));
+
     if (!numericAmount || numericAmount <= 0 || !note.trim()) return;
 
     addInvestment(
@@ -72,6 +117,7 @@ export default function AccountInvestmentDetails() {
         amount: numericAmount,
         note: note.trim(),
         date: date ? toISTDateInputValue(date) : undefined,
+        purchases: normalizedPurchases,
       },
       {
         onSuccess: () => {
@@ -80,6 +126,7 @@ export default function AccountInvestmentDetails() {
           setAmount("");
           setNote("");
           setDate("");
+          setPurchases([emptyPurchaseRow()]);
         },
         onError: (error: Error) => {
           toast({ title: "Failed", description: error.message, variant: "destructive" });
@@ -257,6 +304,109 @@ export default function AccountInvestmentDetails() {
               <div className="space-y-2">
                 <label className="text-sm font-medium">Date (Optional)</label>
                 <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              </div>
+              <div className="space-y-3 rounded-xl border border-border p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <label className="text-sm font-medium">Items You Buy</label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Add purchased items here and stock will increase automatically.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setPurchases((current) => [...current, emptyPurchaseRow()])}
+                  >
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add Item
+                  </Button>
+                </div>
+
+                <div className="space-y-3">
+                  {purchases.map((purchase, index) => {
+                    const selectedProduct = products?.find((product) => product.id === Number(purchase.productId));
+                    return (
+                      <div key={index} className="grid grid-cols-1 gap-3 rounded-lg border border-border p-3 md:grid-cols-[1.5fr_1fr_1fr_auto]">
+                        <div className="space-y-1">
+                          <label className="text-xs text-muted-foreground">Product</label>
+                          <select
+                            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                            value={purchase.productId}
+                            onChange={(e) =>
+                              setPurchases((current) =>
+                                current.map((item, itemIndex) =>
+                                  itemIndex === index ? { ...item, productId: e.target.value } : item,
+                                ),
+                              )
+                            }
+                          >
+                            <option value="">Select item</option>
+                            {products?.map((product) => (
+                              <option key={product.id} value={String(product.id)}>
+                                {product.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs text-muted-foreground">
+                            Qty{selectedProduct ? ` (${getBaseUnit(selectedProduct)})` : ""}
+                          </label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={purchase.quantity}
+                            onChange={(e) =>
+                              setPurchases((current) =>
+                                current.map((item, itemIndex) =>
+                                  itemIndex === index ? { ...item, quantity: e.target.value } : item,
+                                ),
+                              )
+                            }
+                            placeholder="0"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs text-muted-foreground">Rate</label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.001"
+                            value={purchase.costPrice}
+                            onChange={(e) =>
+                              setPurchases((current) =>
+                                current.map((item, itemIndex) =>
+                                  itemIndex === index ? { ...item, costPrice: e.target.value } : item,
+                                ),
+                              )
+                            }
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div className="flex items-end">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={purchases.length === 1}
+                            onClick={() =>
+                              setPurchases((current) =>
+                                current.length === 1 ? current : current.filter((_, itemIndex) => itemIndex !== index),
+                              )
+                            }
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="rounded-lg bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                  Purchase total from items: <span className="font-semibold text-foreground">{formatCurrencyINR(purchaseTotal)}</span>
+                </div>
               </div>
             </div>
             <DialogFooter>

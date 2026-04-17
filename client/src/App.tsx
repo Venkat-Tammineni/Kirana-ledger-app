@@ -1,4 +1,4 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -26,6 +26,7 @@ import QuotationEdit from "@/pages/QuotationEdit";
 import QuotationDetails from "@/pages/QuotationDetails";
 import Ops from "@/pages/Ops";
 import NotFound from "@/pages/not-found";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 
 function Router() {
   return (
@@ -56,6 +57,42 @@ function Router() {
 }
 
 function App() {
+  const [, setLocation] = useLocation();
+  const navigationVoiceCommands = [
+    {
+      label: "Open a page",
+      examples: ["open billing", "customers", "open accounts"],
+      run: ({ normalized }: { raw: string; normalized: string }) => {
+        const routeMap: Record<string, string> = {
+          billing: "/pos",
+          billings: "/pos",
+          pos: "/pos",
+          customers: "/customers",
+          customer: "/customers",
+          products: "/products",
+          product: "/products",
+          accounts: "/accounts",
+          account: "/accounts",
+          staff: "/staff",
+          bills: "/bills",
+          "bill history": "/bills",
+          quotations: "/quotations",
+          quotation: "/quotations",
+          dashboard: "/",
+          inventory: "/inventory",
+          reporting: "/reporting",
+        };
+        const target = normalized.startsWith("open ")
+          ? normalized.replace(/^open\s+/, "").trim()
+          : normalized.trim();
+        const route = routeMap[target];
+        if (!route) return null;
+        setLocation(route);
+        return `Opening ${target}.`;
+      },
+    },
+  ];
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -66,6 +103,12 @@ function App() {
           </main>
           <MobileNav />
           <Toaster />
+          <VoiceAssistant
+            title="Voice Navigation"
+            subtitle="Use voice to open pages from anywhere in the app."
+            commands={navigationVoiceCommands}
+            className="left-4 right-auto items-start"
+          />
         </div>
       </TooltipProvider>
     </QueryClientProvider>

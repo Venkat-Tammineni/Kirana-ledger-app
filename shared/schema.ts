@@ -1,5 +1,5 @@
 
-import { pgTable, text, serial, integer, numeric, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, numeric, timestamp, boolean, doublePrecision } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { relations } from "drizzle-orm";
 import { z } from "zod";
@@ -19,8 +19,8 @@ export const customers = pgTable("customers", {
 export const products = pgTable("products", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
-  price: numeric("price", { precision: 10, scale: 2 }).default("0"), // Selling price
-  costPrice: numeric("cost_price", { precision: 10, scale: 2 }).default("0"), // Purchase/cost price
+  price: numeric("price", { precision: 10, scale: 3 }).default("0"), // Selling price
+  costPrice: numeric("cost_price", { precision: 10, scale: 3 }).default("0"), // Purchase/cost price
   primaryUnit: text("primary_unit").default("PCS").notNull(),
   secondaryUnit: text("secondary_unit"),
   unitConversion: integer("unit_conversion"),
@@ -54,12 +54,12 @@ export const billItems = pgTable("bill_items", {
   billId: integer("bill_id").notNull().references(() => bills.id),
   productId: integer("product_id").references(() => products.id),
   name: text("name").notNull(), // Snapshot of name in case product changes
-  quantity: integer("quantity").notNull(),
+  quantity: doublePrecision("quantity").notNull(),
   unit: text("unit").default("PCS"),
   baseQuantity: integer("base_quantity"),
   baseUnit: text("base_unit"),
-  price: numeric("price", { precision: 10, scale: 2 }).notNull(), // Snapshot of selling price
-  costPrice: numeric("cost_price", { precision: 10, scale: 2 }).default("0"), // Snapshot of cost price
+  price: numeric("price", { precision: 10, scale: 3 }).notNull(), // Snapshot of selling price
+  costPrice: numeric("cost_price", { precision: 10, scale: 3 }).default("0"), // Snapshot of cost price
   subtotal: numeric("subtotal", { precision: 10, scale: 2 }).notNull(),
 });
 
@@ -91,12 +91,12 @@ export const quotationItems = pgTable("quotation_items", {
   quotationId: integer("quotation_id").notNull().references(() => quotations.id),
   productId: integer("product_id").references(() => products.id),
   name: text("name").notNull(),
-  quantity: integer("quantity").notNull(),
+  quantity: doublePrecision("quantity").notNull(),
   unit: text("unit").default("PCS"),
   baseQuantity: integer("base_quantity"),
   baseUnit: text("base_unit"),
-  price: numeric("price", { precision: 10, scale: 2 }).notNull(),
-  costPrice: numeric("cost_price", { precision: 10, scale: 2 }).default("0"),
+  price: numeric("price", { precision: 10, scale: 3 }).notNull(),
+  costPrice: numeric("cost_price", { precision: 10, scale: 3 }).default("0"),
   subtotal: numeric("subtotal", { precision: 10, scale: 2 }).notNull(),
 });
 
@@ -125,6 +125,7 @@ export const customerProfitAdjustments = pgTable("customer_profit_adjustments", 
   id: serial("id").primaryKey(),
   customerId: integer("customer_id").notNull().references(() => customers.id),
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull().default("0"),
+  profitDate: timestamptz("profit_date"),
   createdAt: timestamptz("created_at").defaultNow(),
 });
 
@@ -371,6 +372,7 @@ export type CreateBillRequest = {
   customerId?: number; // Optional for walk-in
   customerName?: string; // If new or walk-in
   customerPhone?: string; // If new or walk-in
+  paymentAccountId?: number;
   items: {
     productId?: number;
     name: string;
@@ -391,6 +393,7 @@ export type CreateBillRequest = {
 
 export type UpdateBillRequest = {
   customerId?: number;
+  paymentAccountId?: number;
   items: {
     productId?: number;
     name: string;

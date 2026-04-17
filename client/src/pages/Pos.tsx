@@ -1,14 +1,35 @@
-import { useState, useMemo } from "react";
-import { useProducts, useCreateBill, useCustomers } from "@/hooks/use-pos";
+import { useEffect, useMemo, useState } from "react";
+import {
+  fetchLastBilledItemMemory,
+  useAccounts,
+  useCreateBill,
+  useCreateProduct,
+  useCustomers,
+  useLastBilledItemMemory,
+  useProducts,
+} from "@/hooks/use-pos";
 import { Search, Plus, Trash2, IndianRupee, Save, CreditCard, UserPlus, CalendarIcon, ShoppingBag } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import { useToast } from "@/hooks/use-toast";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { cn } from "@/lib/utils";
 import { formatCurrencyINR, formatDate, toISTDateTimeStringForApi } from "@/lib/format";
+import { compactVoiceText, createVoiceSearchKeys, parseBillingLineCommand, parseSpokenAmount } from "@/lib/voice-commands";
 import {
   deriveUnitPriceFromBase,
   getBaseUnit,
@@ -20,6 +41,7 @@ import {
   UNIT_OPTIONS,
   type UnitOption,
 } from "@shared/units";
+import { getISTDateKey, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
 
 interface CartItem {
   tempId: string;
@@ -46,6 +68,7 @@ interface PendingProductSelection {
   productId: number;
   name: string;
   price: string;
+  quantity: string;
   baseCostPrice: number;
   unit: UnitOption;
   primaryUnit: UnitOption;
@@ -53,10 +76,244 @@ interface PendingProductSelection {
   unitConversion?: number | null;
 }
 
+const POS_DRAFT_STORAGE_KEY = "kirana-pos-draft";
+const GRAM_QUICK_OPTIONS = [100, 150, 250, 500] as const;
+const ROUND_OFF_LABEL = "Round Off";
+
+type PosDraftState = {
+  cart: CartItem[];
+  searchTerm: string;
+  selectedCustomer: number | null;
+  extraCharges: ExtraChargeRow[];
+  pendingProduct: PendingProductSelection | null;
+  customItem: { name: string; price: string; costPrice: string; quantity: string; unit: UnitOption; addToProducts: boolean };
+  isPaymentOpen: boolean;
+  paidAmount: string;
+  paymentAccountId: number | null;
+  billDate: string | null;
+  billDateManuallyChanged?: boolean;
+};
+
+function getDefaultBillDate() {
+  return parseISTDateOnly(getISTDateKey(new Date()));
+}
+
+const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
+  "allam paste": ["alam paste", "allam", "alam"],
+  "avalu": ["aavaalu", "aavalu"],
+  "basmati rice": ["basmathi rice", "basmati", "basmathi"],
+  "batani": ["batani sh"],
+  "bellam": ["belam"],
+  "besan": ["beasan"],
+  "besan sh": ["beshan sh", "besan s h"],
+  "biryani akku": ["biryani aaku", "biryani leaf"],
+  "chakki": ["chaki"],
+  "chana dal": ["chana dhal", "channa dal"],
+  "chekka dalchni": ["chekka dalchini", "dalchini"],
+  "chicken danda": ["chicken dunda"],
+  "chicken everest": ["everest chicken"],
+  "chicken masala": ["chicken masla"],
+  "chilli sause": ["chilli sauce", "chili sauce", "chili sause"],
+  "coconut powder": ["coco powder", "coconut"],
+  "corn flour": ["cornflour"],
+  dal: ["dhal"],
+  "dal broken": ["dhal broken", "broken dal"],
+  dalda: ["dal da"],
+  "dhaniya powder": ["daniya powder", "coriander powder"],
+  dhaniyalu: ["daniyalu"],
+  "dosa pappu": ["dosha pappu"],
+  "dry mirchi": ["dry mirchi powder", "dry chili"],
+  elachi: ["elaichi"],
+  "fried palli": ["fry palli"],
+  "garam everest": ["everest garam"],
+  "garam masala": ["garam masla"],
+  gasagasalu: ["gas gasalu", "khas khas"],
+  "gingelly oil": ["gingili oil", "sesame oil"],
+  gottalu: ["gothalu"],
+  "green colour bush": ["green color bush"],
+  "gundu dh": ["gundu d h"],
+  "gundu dhh": ["gundu d h h"],
+  "gundu jyothi": ["gundu jothi"],
+  idly: ["idli"],
+  "idly lohitha": ["idli lohitha"],
+  imly: ["imli"],
+  japthri: ["japtri", "japathri"],
+  jera: ["jeera"],
+  kaju: ["kaju 2p", "cashew"],
+  "kaju chura n2": ["kaju chura n 2", "kaju chura number 2"],
+  "kaju chura no.1": ["kaju chura no 1", "kaju chura number 1"],
+  "kastur methi": ["kasuri methi"],
+  kismis: ["kishmish"],
+  "kitchen king everest": ["everest kitchen king"],
+  lavangam: ["lavang"],
+  lg: ["l g"],
+  "lg choclate": ["lg chocolate"],
+  maida: ["maidha"],
+  "maida sh": ["maida s h"],
+  "marati mogga": ["marathi mogga"],
+  menthulu: ["methi seeds"],
+  "milky maid": ["milkmaid"],
+  milmaker: ["meal maker"],
+  "mirchi powder": ["mirchi", "chili powder", "chilli powder"],
+  miryalu: ["mirialu", "pepper"],
+  "moong dal": ["mung dal"],
+  "mtr sambar": ["m t r sambar"],
+  noodles: ["nudles"],
+  nuvvulu: ["nuvulu", "sesame"],
+  "oil 16p": ["oil 16p priya", "16p oil", "priya oil 16p"],
+  palli: ["palli kalyani", "groundnut"],
+  "papad anapurna": ["papad", "papad anapoorna"],
+  pasupu: ["turmeric"],
+  pesarlu: ["pesalu"],
+  poha: ["avalaki"],
+  poori: ["puri"],
+  "poori sh": ["poori s h", "puri sh"],
+  "pucha pappu": ["pocha pappu"],
+  "putana daliya": ["putana dalia", "putana"],
+  putana: ["putana whole"],
+  "r salt konark": ["r salt", "konark salt"],
+  "ragi aata amma": ["ragi atta amma", "ragi aata"],
+  rasam: ["rasam powder"],
+  "ration rice": ["rasan rice"],
+  "red colour bush": ["red color bush"],
+  rice: ["white rice"],
+  "ruchi 15kg": ["ruchi 15 kg"],
+  "ruchi oil": ["ruchi"],
+  "sabji masala": ["sabzi masala"],
+  salt: ["sault"],
+  "salt ashirvad": ["ashirvad salt", "ashirwad salt"],
+  sambar: ["sambhar"],
+  semiya: ["seviyan"],
+  shajera: ["shajeera", "sha jeera"],
+  "soap surfexcel": ["surf excel soap", "soap surf excel", "surfexcel"],
+  soda: ["soda powder"],
+  sooji: ["suji", "sooji rava"],
+  "sooji sh": ["suji sh", "sooji s h"],
+  "soya sause": ["soya sauce", "soya sause", "soy sauce"],
+  "split urad dal": ["split ured dal", "urad dal", "urad"],
+  stars: ["star anise", "star"],
+  sugar: ["shugar"],
+  surf: ["surf powder"],
+  "swasthik mirchi powder": ["garam swasthik", "swasthik", "swastik mirchi powder"],
+  "tasty salt": ["testy salt", "tasty"],
+  "tomato sause": ["tomato sauce", "tomato sause"],
+  "ura mirchi": ["ura mirchi powder", "ura chilli"],
+  vineger: ["vinegar", "winiger"],
+  "yellow colour bush": ["yellow color bush"],
+};
+
+const DIRECT_PRODUCT_VOICE_TARGETS: Record<string, string> = {
+  "allam paste": "allam paste",
+  avalu: "avalu",
+  "basmati rice": "basmati rice",
+  batani: "batani",
+  bellam: "bellam",
+  besan: "besan",
+  "besan sh": "besan sh",
+  "biryani akku": "biryani akku",
+  chakki: "chakki",
+  "chana dal": "chana dal",
+  "chekka dalchni": "chekka dalchni",
+  "chicken danda": "chicken danda",
+  "chicken everest": "chicken everest",
+  "chicken masala": "chicken masala",
+  "chilli sause": "chilli sause",
+  "coconut powder": "coconut powder",
+  "corn flour": "corn flour",
+  dal: "dal",
+  "dal broken": "dal broken",
+  dalda: "dalda",
+  "dhaniya powder": "dhaniya powder",
+  dhaniyalu: "dhaniyalu",
+  "dosa pappu": "dosa pappu",
+  "dry mirchi": "dry mirchi",
+  elachi: "elachi",
+  "fried palli": "fried palli",
+  "garam everest": "garam everest",
+  "garam masala": "garam masala",
+  gasagasalu: "gasagasalu",
+  "garam swasthik": "swasthik mirchi powder",
+  "gingelly oil": "gingelly oil",
+  gottalu: "gottalu",
+  "green colour bush": "green colour bush",
+  "gundu dh": "gundu dh",
+  "gundu dhh": "gundu dhh",
+  "gundu jyothi": "gundu jyothi",
+  idly: "idly",
+  "idly lohitha": "idly lohitha",
+  imly: "imly",
+  japthri: "japthri",
+  jera: "jera",
+  "kaju 2p": "kaju",
+  "kaju chura n2": "kaju chura n2",
+  "kaju chura no.1": "kaju chura no.1",
+  "kastur methi": "kastur methi",
+  kismis: "kismis",
+  "kitchen king everest": "kitchen king everest",
+  lavangam: "lavangam",
+  lg: "lg",
+  "lg choclate": "lg choclate",
+  maida: "maida",
+  "maida sh": "maida sh",
+  "marati mogga": "marati mogga",
+  menthulu: "menthulu",
+  "milky maid": "milky maid",
+  milmaker: "milmaker",
+  "mirchi powder": "mirchi powder",
+  miryalu: "miryalu",
+  "moong dal": "moong dal",
+  "mtr sambar": "mtr sambar",
+  noodles: "noodles",
+  nuvvulu: "nuvvulu",
+  "oil 16p priya": "oil 16p",
+  palli: "palli",
+  "palli kalyani": "palli",
+  "papad anapurna": "papad anapurna",
+  pasupu: "pasupu",
+  pesarlu: "pesarlu",
+  poha: "poha",
+  poori: "poori",
+  "poori sh": "poori sh",
+  "pucha pappu": "pucha pappu",
+  "putana daliya": "putana daliya",
+  putana: "putana",
+  "r salt konark": "r salt konark",
+  "ragi aata amma": "ragi aata amma",
+  rasam: "rasam",
+  "ration rice": "ration rice",
+  "red colour bush": "red colour bush",
+  rice: "rice",
+  "ruchi 15kg": "ruchi 15kg",
+  "ruchi oil": "ruchi oil",
+  "sabji masala": "sabji masala",
+  salt: "salt",
+  "salt ashirvad": "salt ashirvad",
+  sambar: "sambar",
+  semiya: "semiya",
+  shajera: "shajera",
+  "soap surfexcel": "soap surfexcel",
+  soda: "soda",
+  sooji: "sooji",
+  "sooji sh": "sooji sh",
+  "soya sause": "soya sause",
+  "split urad dal": "split urad dal",
+  stars: "stars",
+  sugar: "sugar",
+  surf: "surf",
+  "swasthik mirchi powder": "swasthik mirchi powder",
+  "tasty salt": "tasty salt",
+  "tomato sause": "tomato sause",
+  "ura mirchi": "ura mirchi",
+  vineger: "vineger",
+  "yellow colour bush": "yellow colour bush",
+};
+
 export default function Pos() {
   const { data: products } = useProducts();
   const { data: customers } = useCustomers();
+  const { data: accounts } = useAccounts();
   const { mutate: createBill, isPending: isSaving } = useCreateBill();
+  const { mutate: createProduct, isPending: isCreatingProduct } = useCreateProduct();
   const { toast } = useToast();
 
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -64,24 +321,416 @@ export default function Pos() {
   const [selectedCustomer, setSelectedCustomer] = useState<number | null>(null);
   const [extraCharges, setExtraCharges] = useState<ExtraChargeRow[]>([]);
   const [pendingProduct, setPendingProduct] = useState<PendingProductSelection | null>(null);
+  const [gramQuantityPickerItemId, setGramQuantityPickerItemId] = useState<string | null>(null);
   
   // Custom item state
   const [isCustomItemOpen, setIsCustomItemOpen] = useState(false);
-  const [customItem, setCustomItem] = useState({ name: "", price: "", quantity: "1", unit: "PCS" as UnitOption });
+  const [customItem, setCustomItem] = useState({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS" as UnitOption, addToProducts: false });
+  const [isCustomGramPickerOpen, setIsCustomGramPickerOpen] = useState(false);
 
   // Payment dialog state
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [paidAmount, setPaidAmount] = useState("");
-  const [billDate, setBillDate] = useState<Date | undefined>(new Date());
+  const [paymentAccountId, setPaymentAccountId] = useState<number | null>(null);
+  const [billDate, setBillDate] = useState<Date | undefined>(() => getDefaultBillDate());
+  const [billDateManuallyChanged, setBillDateManuallyChanged] = useState(false);
+  const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
+  const [chargesOpen, setChargesOpen] = useState(false);
+  const trimmedCustomItemName = customItem.name.trim();
+  const { data: customItemMemory } = useLastBilledItemMemory(
+    selectedCustomer && trimmedCustomItemName
+      ? { customerId: selectedCustomer, name: trimmedCustomItemName }
+      : undefined,
+  );
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
 
-  const filteredProducts = useMemo(() => {
-    if (!products || !searchTerm) return products || [];
-    const lower = searchTerm.toLowerCase();
-    return products.filter(p => p.name.toLowerCase().includes(lower));
-  }, [products, searchTerm]);
+    const savedDraft = window.localStorage.getItem(POS_DRAFT_STORAGE_KEY);
+    if (!savedDraft) return;
 
-  const openProductPriceDialog = (product: any) => {
+    try {
+      const parsed = JSON.parse(savedDraft) as Partial<PosDraftState>;
+      setCart(Array.isArray(parsed.cart) ? parsed.cart : []);
+      setSearchTerm(typeof parsed.searchTerm === "string" ? parsed.searchTerm : "");
+      setSelectedCustomer(typeof parsed.selectedCustomer === "number" ? parsed.selectedCustomer : null);
+      setExtraCharges(Array.isArray(parsed.extraCharges) ? parsed.extraCharges : []);
+      setPendingProduct(
+        parsed.pendingProduct
+          ? {
+              ...parsed.pendingProduct,
+              quantity:
+                typeof parsed.pendingProduct.quantity === "string"
+                  ? parsed.pendingProduct.quantity
+                  : "1",
+            }
+          : null,
+      );
+      setCustomItem(
+        parsed.customItem ?? { name: "", price: "", costPrice: "", quantity: "1", unit: "PCS" as UnitOption, addToProducts: false },
+      );
+      setIsPaymentOpen(Boolean(parsed.isPaymentOpen));
+      setPaidAmount(typeof parsed.paidAmount === "string" ? parsed.paidAmount : "");
+      setPaymentAccountId(typeof parsed.paymentAccountId === "number" ? parsed.paymentAccountId : null);
+      const shouldRestoreSavedDate = typeof parsed.billDate === "string" && parsed.billDateManuallyChanged === true;
+      setBillDate(shouldRestoreSavedDate ? parseISTDateTime(parsed.billDate as string) : getDefaultBillDate());
+      setBillDateManuallyChanged(Boolean(shouldRestoreSavedDate));
+    } catch {
+      window.localStorage.removeItem(POS_DRAFT_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const draft: PosDraftState = {
+      cart,
+      searchTerm,
+      selectedCustomer,
+      extraCharges,
+      pendingProduct,
+      customItem,
+      isPaymentOpen,
+      paidAmount,
+      paymentAccountId,
+      billDate: billDate ? toISTDateTimeStringForApi(billDate) : null,
+      billDateManuallyChanged,
+    };
+
+    window.localStorage.setItem(POS_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  }, [
+    billDate,
+    cart,
+    customItem,
+    extraCharges,
+    isPaymentOpen,
+    paidAmount,
+    paymentAccountId,
+    pendingProduct,
+    searchTerm,
+    selectedCustomer,
+    billDateManuallyChanged,
+  ]);
+
+  useEffect(() => {
+    if (!customItemMemory || !selectedCustomer) return;
+
+    setCustomItem((current) => {
+      const currentName = current.name.trim();
+      if (currentName.toLowerCase() !== customItemMemory.name.trim().toLowerCase()) {
+        return current;
+      }
+
+      const nextUnit = UNIT_OPTIONS.includes(customItemMemory.unit as UnitOption)
+        ? (customItemMemory.unit as UnitOption)
+        : current.unit;
+      const shouldApplyPrice = current.price.trim().length === 0;
+      const shouldApplyCostPrice = current.costPrice.trim().length === 0 || Number(current.costPrice) === 0;
+      const shouldApplyQuantity = current.quantity.trim().length === 0 || Number(current.quantity) === 1;
+      const shouldApplyUnit = current.unit === "PCS";
+
+      if (!shouldApplyPrice && !shouldApplyCostPrice && !shouldApplyQuantity && !shouldApplyUnit) {
+        return current;
+      }
+
+      return {
+        ...current,
+        price: shouldApplyPrice ? customItemMemory.price.toString() : current.price,
+        costPrice: shouldApplyCostPrice ? customItemMemory.costPrice.toString() : current.costPrice,
+        quantity: shouldApplyQuantity ? customItemMemory.quantity.toString() : current.quantity,
+        unit: shouldApplyUnit ? nextUnit : current.unit,
+      };
+    });
+  }, [customItemMemory, selectedCustomer]);
+
+  const clearBillDraft = () => {
+    setCart([]);
+    setSearchTerm("");
+    setSelectedCustomer(null);
+    setExtraCharges([]);
+    setPendingProduct(null);
+    setIsCustomItemOpen(false);
+    setCustomItem({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS", addToProducts: false });
+    setIsCustomGramPickerOpen(false);
+    setIsPaymentOpen(false);
+    setPaidAmount("");
+    setPaymentAccountId(null);
+    setBillDate(getDefaultBillDate());
+    setBillDateManuallyChanged(false);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(POS_DRAFT_STORAGE_KEY);
+    }
+  };
+
+  const findCustomerByVoice = (query: string) => {
+    const queryKeys = createVoiceSearchKeys(query);
+    const levenshtein = (a: string, b: string) => {
+      const rows = a.length + 1;
+      const cols = b.length + 1;
+      const dp = Array.from({ length: rows }, () => Array<number>(cols).fill(0));
+      for (let i = 0; i < rows; i += 1) dp[i][0] = i;
+      for (let j = 0; j < cols; j += 1) dp[0][j] = j;
+      for (let i = 1; i < rows; i += 1) {
+        for (let j = 1; j < cols; j += 1) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          dp[i][j] = Math.min(
+            dp[i - 1][j] + 1,
+            dp[i][j - 1] + 1,
+            dp[i - 1][j - 1] + cost,
+          );
+        }
+      }
+      return dp[a.length][b.length];
+    };
+
+    const rankedMatches = (customers || [])
+      .map((customer) => {
+        const customerKeys = createVoiceSearchKeys(customer.name);
+        let score = 0;
+
+        if (customerKeys.normalized === queryKeys.normalized) score += 1200;
+        if (customerKeys.compact === queryKeys.compact) score += 1050;
+        if (customerKeys.phoneticCompact === queryKeys.phoneticCompact) score += 1000;
+        if (customerKeys.normalized.startsWith(queryKeys.normalized)) score += 760;
+        if (customerKeys.compact.startsWith(queryKeys.compact)) score += 720;
+        if (customerKeys.phoneticCompact.startsWith(queryKeys.phoneticCompact)) score += 700;
+        if (customerKeys.normalized.includes(queryKeys.normalized)) score += 560;
+        if (customerKeys.compact.includes(queryKeys.compact)) score += 520;
+        if (customerKeys.phoneticCompact.includes(queryKeys.phoneticCompact)) score += 500;
+
+        const tokenHits = queryKeys.tokens.filter((token) =>
+          customerKeys.tokens.some((customerToken) => {
+            if (customerToken === token) return true;
+            if (customerToken.includes(token) || token.includes(customerToken)) return true;
+            return levenshtein(customerToken, token) <= 1;
+          }),
+        ).length;
+        score += tokenHits * 145;
+
+        const compactDistance = levenshtein(customerKeys.compact, queryKeys.compact);
+        const compactMaxLength = Math.max(customerKeys.compact.length, queryKeys.compact.length, 1);
+        const similarity = 1 - compactDistance / compactMaxLength;
+
+        const phoneticDistance = levenshtein(customerKeys.phoneticCompact, queryKeys.phoneticCompact);
+        const phoneticMaxLength = Math.max(customerKeys.phoneticCompact.length, queryKeys.phoneticCompact.length, 1);
+        const phoneticSimilarity = 1 - phoneticDistance / phoneticMaxLength;
+
+        score += Math.round(similarity * 280);
+        score += Math.round(phoneticSimilarity * 320);
+
+        if (score === 0) return null;
+
+        return {
+          customer,
+          score,
+          similarity,
+          phoneticSimilarity,
+          nameLength: customer.name.length,
+        };
+      })
+      .filter(
+        (entry): entry is {
+          customer: any;
+          score: number;
+          similarity: number;
+          phoneticSimilarity: number;
+          nameLength: number;
+        } => entry !== null,
+      )
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.phoneticSimilarity - a.phoneticSimilarity ||
+          b.similarity - a.similarity ||
+          a.nameLength - b.nameLength,
+      );
+
+    if (rankedMatches.length === 0) return null;
+    if (rankedMatches.length === 1) return rankedMatches[0].customer;
+
+    const [best, second] = rankedMatches;
+    if (best.similarity >= 0.76 || best.phoneticSimilarity >= 0.8) return best.customer;
+    if (best.score >= second.score + 70) return best.customer;
+    if (best.score >= 700 && best.score >= Math.round(second.score * 1.12)) return best.customer;
+
+    return null;
+  };
+
+  const findProductByVoice = (query: string) => {
+    const queryKeys = createVoiceSearchKeys(query);
+    const directTargetName =
+      DIRECT_PRODUCT_VOICE_TARGETS[query.trim().toLowerCase()] ||
+      DIRECT_PRODUCT_VOICE_TARGETS[queryKeys.normalized] ||
+      DIRECT_PRODUCT_VOICE_TARGETS[queryKeys.compact];
+
+    if (directTargetName) {
+      const directTargetKeys = createVoiceSearchKeys(directTargetName);
+      const directMatches = (products || [])
+        .filter((product) => createVoiceSearchKeys(product.name).normalized === directTargetKeys.normalized)
+        .sort(
+          (a, b) =>
+            Number(b.stock || 0) - Number(a.stock || 0) ||
+            a.name.length - b.name.length,
+        );
+      if (directMatches.length > 0) {
+        return directMatches[0];
+      }
+    }
+
+    const levenshtein = (a: string, b: string) => {
+      const rows = a.length + 1;
+      const cols = b.length + 1;
+      const dp = Array.from({ length: rows }, () => Array<number>(cols).fill(0));
+      for (let i = 0; i < rows; i += 1) dp[i][0] = i;
+      for (let j = 0; j < cols; j += 1) dp[0][j] = j;
+      for (let i = 1; i < rows; i += 1) {
+        for (let j = 1; j < cols; j += 1) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          dp[i][j] = Math.min(
+            dp[i - 1][j] + 1,
+            dp[i][j - 1] + 1,
+            dp[i - 1][j - 1] + cost,
+          );
+        }
+      }
+      return dp[a.length][b.length];
+    };
+
+    const rankedMatches = (products || [])
+      .map((product) => {
+        const productName = product.name.trim().toLowerCase();
+        const productKeys = createVoiceSearchKeys(product.name);
+        const aliasNames = PRODUCT_VOICE_ALIASES[productName] || [];
+        const aliasKeys = aliasNames.map((alias) => createVoiceSearchKeys(alias));
+        const availableStock = Number(product.stock || 0);
+
+        let score = 0;
+
+        if (productKeys.normalized === queryKeys.normalized) score += 1200;
+        if (productKeys.compact === queryKeys.compact) score += 1050;
+        if (productKeys.phoneticCompact === queryKeys.phoneticCompact) score += 1000;
+        if (productKeys.normalized.startsWith(queryKeys.normalized)) score += 760;
+        if (productKeys.compact.startsWith(queryKeys.compact)) score += 720;
+        if (productKeys.phoneticCompact.startsWith(queryKeys.phoneticCompact)) score += 700;
+        if (productKeys.normalized.includes(queryKeys.normalized)) score += 560;
+        if (productKeys.compact.includes(queryKeys.compact)) score += 520;
+        if (productKeys.phoneticCompact.includes(queryKeys.phoneticCompact)) score += 500;
+
+        const tokenHits = queryKeys.tokens.filter((token) =>
+          productKeys.tokens.some((productToken) => {
+            if (productToken === token) return true;
+            if (productToken.includes(token) || token.includes(productToken)) return true;
+            return levenshtein(productToken, token) <= 1;
+          }),
+        ).length;
+        score += tokenHits * 145;
+
+        const phoneticTokenHits = queryKeys.phoneticTokens.filter((token) =>
+          productKeys.phoneticTokens.some((productToken) => {
+            if (productToken === token) return true;
+            if (productToken.includes(token) || token.includes(productToken)) return true;
+            return levenshtein(productToken, token) <= 1;
+          }),
+        ).length;
+        score += phoneticTokenHits * 130;
+
+        const compactDistance = levenshtein(productKeys.compact, queryKeys.compact);
+        const compactMaxLength = Math.max(productKeys.compact.length, queryKeys.compact.length, 1);
+        const similarity = 1 - compactDistance / compactMaxLength;
+
+        const phoneticDistance = levenshtein(productKeys.phoneticCompact, queryKeys.phoneticCompact);
+        const phoneticMaxLength = Math.max(productKeys.phoneticCompact.length, queryKeys.phoneticCompact.length, 1);
+        const phoneticSimilarity = 1 - phoneticDistance / phoneticMaxLength;
+
+        score += Math.round(similarity * 280);
+        score += Math.round(phoneticSimilarity * 320);
+
+        let aliasSimilarity = 0;
+        let aliasPhoneticSimilarity = 0;
+        let aliasBoost = 0;
+
+        for (const aliasKey of aliasKeys) {
+          if (aliasKey.normalized === queryKeys.normalized) aliasBoost = Math.max(aliasBoost, 1200);
+          if (aliasKey.compact === queryKeys.compact) aliasBoost = Math.max(aliasBoost, 1050);
+          if (aliasKey.phoneticCompact === queryKeys.phoneticCompact) aliasBoost = Math.max(aliasBoost, 1000);
+          if (aliasKey.normalized.startsWith(queryKeys.normalized)) aliasBoost = Math.max(aliasBoost, 760);
+          if (aliasKey.compact.startsWith(queryKeys.compact)) aliasBoost = Math.max(aliasBoost, 720);
+          if (aliasKey.phoneticCompact.startsWith(queryKeys.phoneticCompact)) aliasBoost = Math.max(aliasBoost, 700);
+          if (aliasKey.normalized.includes(queryKeys.normalized)) aliasBoost = Math.max(aliasBoost, 560);
+          if (aliasKey.compact.includes(queryKeys.compact)) aliasBoost = Math.max(aliasBoost, 520);
+          if (aliasKey.phoneticCompact.includes(queryKeys.phoneticCompact)) aliasBoost = Math.max(aliasBoost, 500);
+
+          const aliasTokenHits = queryKeys.tokens.filter((token) =>
+            aliasKey.tokens.some((aliasToken) => {
+              if (aliasToken === token) return true;
+              if (aliasToken.includes(token) || token.includes(aliasToken)) return true;
+              return levenshtein(aliasToken, token) <= 1;
+            }),
+          ).length;
+          aliasBoost = Math.max(aliasBoost, aliasTokenHits * 145);
+
+          const currentAliasDistance = levenshtein(aliasKey.compact, queryKeys.compact);
+          const currentAliasMaxLength = Math.max(aliasKey.compact.length, queryKeys.compact.length, 1);
+          aliasSimilarity = Math.max(aliasSimilarity, 1 - currentAliasDistance / currentAliasMaxLength);
+
+          const currentAliasPhoneticDistance = levenshtein(aliasKey.phoneticCompact, queryKeys.phoneticCompact);
+          const currentAliasPhoneticMaxLength = Math.max(aliasKey.phoneticCompact.length, queryKeys.phoneticCompact.length, 1);
+          aliasPhoneticSimilarity = Math.max(
+            aliasPhoneticSimilarity,
+            1 - currentAliasPhoneticDistance / currentAliasPhoneticMaxLength,
+          );
+        }
+
+        score += aliasBoost;
+        score += Math.round(aliasSimilarity * 240);
+        score += Math.round(aliasPhoneticSimilarity * 280);
+
+        if (availableStock > 0) {
+          score += Math.min(availableStock, 25);
+        }
+
+        if (score === 0) return null;
+
+        return {
+          product,
+          score,
+          nameLength: productName.length,
+          similarity: Math.max(similarity, aliasSimilarity),
+          phoneticSimilarity: Math.max(phoneticSimilarity, aliasPhoneticSimilarity),
+          availableStock,
+        };
+      })
+      .filter(
+        (entry): entry is {
+          product: any;
+          score: number;
+          nameLength: number;
+          similarity: number;
+          phoneticSimilarity: number;
+          availableStock: number;
+        } => entry !== null,
+      )
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.phoneticSimilarity - a.phoneticSimilarity ||
+          b.similarity - a.similarity ||
+          b.availableStock - a.availableStock ||
+          a.nameLength - b.nameLength,
+      );
+
+    if (rankedMatches.length === 0) return null;
+    if (rankedMatches.length === 1) return rankedMatches[0].product;
+
+    const [best, second] = rankedMatches;
+    if (best.similarity >= 0.76 || best.phoneticSimilarity >= 0.8) return best.product;
+    if (best.score >= second.score + 70) return best.product;
+    if (best.score >= 700 && best.score >= Math.round(second.score * 1.12)) return best.product;
+
+    return null;
+  };
+
+  const addExistingProductToCartByVoice = (product: any, quantity = 1) => {
     const unitConfig = {
       primaryUnit: product.primaryUnit,
       secondaryUnit: product.secondaryUnit,
@@ -92,19 +741,470 @@ export default function Pos() {
     const baseCostPrice = Number(product.costPrice || 0);
     const defaultPrice = deriveUnitPriceFromBase(basePrice, unitConfig, defaultUnit);
 
-    if (defaultPrice > 0) {
-      setCart(prev => {
-        const existing = prev.find((item) =>
+    if (defaultPrice <= 0) {
+      setPendingProduct({
+        productId: product.id,
+        name: product.name,
+        price: defaultPrice.toString(),
+        quantity: quantity.toString(),
+        baseCostPrice,
+        unit: defaultUnit,
+        primaryUnit: getPrimaryUnit(unitConfig),
+        secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+        unitConversion: product.unitConversion ?? null,
+      });
+      return false;
+    }
+
+    setCart((prev) => {
+      const existing = prev.find(
+        (item) =>
+          item.productId === product.id &&
+          item.unit === defaultUnit &&
+          Math.abs(item.price - defaultPrice) < 0.0001,
+      );
+      if (existing) {
+        return prev.map((item) =>
           item.productId === product.id &&
           item.unit === defaultUnit &&
           Math.abs(item.price - defaultPrice) < 0.0001
+            ? { ...item, quantity: item.quantity + quantity }
+            : item,
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          tempId: crypto.randomUUID(),
+          productId: product.id,
+          name: product.name,
+          price: defaultPrice,
+          basePrice,
+          costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, defaultUnit),
+          baseCostPrice,
+          quantity,
+          unit: defaultUnit,
+          primaryUnit: getPrimaryUnit(unitConfig),
+          secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+          unitConversion: product.unitConversion ?? null,
+        },
+      ];
+    });
+    setSearchTerm("");
+    return true;
+  };
+
+  const billingVoiceCommands = useMemo(
+    () => [
+      {
+        label: "Billing shortcuts",
+        examples: ["bill to pulav and besan and mirchi and save", "pulav besan mirchi save"],
+        run: ({ raw, normalized }: { raw: string; normalized: string }) => {
+          let nextCustomerId = selectedCustomer;
+          let nextCart = [...cart];
+          let nextPaidAmount = paidAmount;
+          let shouldSave = false;
+          let shouldOpenPayment = false;
+
+          const addProductLocally = (product: any, quantity = 1) => {
+            const unitConfig = {
+              primaryUnit: product.primaryUnit,
+              secondaryUnit: product.secondaryUnit,
+              unitConversion: product.unitConversion,
+            };
+            const defaultUnit = getDefaultSalesUnit(unitConfig);
+            const basePrice = Number(product.price || 0);
+            const baseCostPrice = Number(product.costPrice || 0);
+            const defaultPrice = deriveUnitPriceFromBase(basePrice, unitConfig, defaultUnit);
+
+            if (defaultPrice <= 0) {
+              setPendingProduct({
+                productId: product.id,
+                name: product.name,
+                price: defaultPrice.toString(),
+                quantity: quantity.toString(),
+                baseCostPrice,
+                unit: defaultUnit,
+                primaryUnit: getPrimaryUnit(unitConfig),
+                secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+                unitConversion: product.unitConversion ?? null,
+              });
+              return false;
+            }
+
+            nextCart = [
+              ...nextCart,
+              {
+                tempId: crypto.randomUUID(),
+                productId: product.id,
+                name: product.name,
+                price: defaultPrice,
+                basePrice,
+                costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, defaultUnit),
+                baseCostPrice,
+                quantity,
+                unit: defaultUnit,
+                primaryUnit: getPrimaryUnit(unitConfig),
+                secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+                unitConversion: product.unitConversion ?? null,
+              },
+            ];
+            return true;
+          };
+
+          const processStep = (stepRaw: string, stepNormalized: string): string | null => {
+            const parsedLine = parseBillingLineCommand(stepRaw);
+            if (parsedLine) {
+              const product = findProductByVoice(parsedLine.productName);
+              if (!product) return `I could not find ${parsedLine.productName} in products.`;
+
+              const unitConfig = {
+                primaryUnit: product.primaryUnit,
+                secondaryUnit: product.secondaryUnit,
+                unitConversion: product.unitConversion,
+              };
+              const unit = parsedLine.unit || getDefaultSalesUnit(unitConfig);
+              const baseSellPrice =
+                parsedLine.sellingPrice != null
+                  ? normalizeUnitPriceToBase(parsedLine.sellingPrice, unitConfig, unit)
+                  : Number(product.price || 0);
+              const baseCostPrice =
+                parsedLine.costPrice != null
+                  ? normalizeUnitPriceToBase(parsedLine.costPrice, unitConfig, unit)
+                  : Number(product.costPrice || 0);
+
+              nextCart = [
+                ...nextCart,
+                {
+                  tempId: crypto.randomUUID(),
+                  productId: product.id,
+                  name: product.name,
+                  price: deriveUnitPriceFromBase(baseSellPrice, unitConfig, unit),
+                  basePrice: baseSellPrice,
+                  costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, unit),
+                  baseCostPrice,
+                  quantity: parsedLine.quantity,
+                  unit,
+                  primaryUnit: getPrimaryUnit(unitConfig),
+                  secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+                  unitConversion: product.unitConversion ?? null,
+                },
+              ];
+              return `${product.name} added.`;
+            }
+
+            if (["save", "save bill", "complete bill", "complete order"].includes(stepNormalized)) {
+              if (nextCart.length === 0) return "The current bill is empty.";
+              shouldSave = true;
+              return "Ready to save bill.";
+            }
+
+            if (["open payment", "checkout"].includes(stepNormalized)) {
+              if (nextCart.length === 0) return "The current bill is empty.";
+              shouldOpenPayment = true;
+              return "Ready to open payment.";
+            }
+
+            const customerMatch = stepNormalized.match(/^(customer|select customer|bill to|to)\s+(.+)$/);
+            if (customerMatch) {
+              const customer = findCustomerByVoice(customerMatch[2].trim());
+              if (!customer) return `I could not uniquely match ${customerMatch[2].trim()}.`;
+              nextCustomerId = customer.id;
+              return `Selected customer ${customer.name}.`;
+            }
+
+            const paidMatch = stepNormalized.match(/^(paid|amount received)\s+(.+)$/);
+            if (paidMatch) {
+              const amount = parseSpokenAmount(paidMatch[2]);
+              if (amount == null) return "I could not understand that amount.";
+              nextPaidAmount = String(amount);
+              return `Paid amount set to ${amount}.`;
+            }
+
+            if (stepNormalized.startsWith("search ") || stepNormalized.startsWith("find ")) {
+              const query = stepNormalized.replace(/^(search|find)\s+/, "").trim();
+              setSearchTerm(query);
+              return `Searching for ${query}.`;
+            }
+
+            const product = findProductByVoice(stepRaw);
+            if (product) {
+              const added = addProductLocally(product, 1);
+              return added ? `${product.name} added.` : `${product.name} needs price confirmation.`;
+            }
+
+            return null;
+          };
+
+          const sequenceParts = normalized
+            .split(/\s+(?:and|then)\s+|,\s*/)
+            .map((part) => part.trim())
+            .filter(Boolean);
+
+          if (sequenceParts.length > 1) {
+            const stepMessages: string[] = [];
+            for (const part of sequenceParts) {
+              const result = processStep(part, part);
+              if (!result) return null;
+              stepMessages.push(result);
+            }
+
+            setSelectedCustomer(nextCustomerId);
+            setCart(nextCart);
+            setPaidAmount(nextPaidAmount);
+            if (shouldOpenPayment) {
+              setIsPaymentOpen(true);
+            }
+            if (shouldSave) {
+              submitBill(Number(nextPaidAmount || 0), nextCart, nextCustomerId ?? undefined);
+            }
+            return stepMessages.join(" ");
+          }
+
+          const compactParts = normalized.split(" ").filter(Boolean);
+          if (compactParts.length >= 3 && compactParts[compactParts.length - 1] === "save") {
+            const customer = findCustomerByVoice(compactParts[0]);
+            if (!customer) return null;
+            nextCustomerId = customer.id;
+            const productNames = compactParts.slice(1, -1);
+            const stepMessages = [`Selected customer ${customer.name}.`];
+            for (const productName of productNames) {
+              const product = findProductByVoice(productName);
+              if (!product) return `I could not find ${productName} in products.`;
+              const added = addProductLocally(product, 1);
+              stepMessages.push(added ? `${product.name} added.` : `${product.name} needs price confirmation.`);
+            }
+            setSelectedCustomer(nextCustomerId);
+            setCart(nextCart);
+            submitBill(Number(nextPaidAmount || 0), nextCart, nextCustomerId ?? undefined);
+            stepMessages.push("Saving bill now.");
+            return stepMessages.join(" ");
+          }
+
+          return null;
+        },
+      },
+      {
+        label: "Add bill item",
+        examples: ["besan 5kg", "mirchi 2 kg 140", "besan 5 kg selling price 80"],
+        run: ({ raw }: { raw: string; normalized: string }) => {
+          const parsed = parseBillingLineCommand(raw);
+          if (!parsed) return null;
+
+          const product = findProductByVoice(parsed.productName);
+
+          if (!product) {
+            return `I could not find ${parsed.productName} in products. Use Custom Item if it is new.`;
+          }
+
+          const unitConfig = {
+            primaryUnit: product.primaryUnit,
+            secondaryUnit: product.secondaryUnit,
+            unitConversion: product.unitConversion,
+          };
+          const unit = parsed.unit || getDefaultSalesUnit(unitConfig);
+          const baseSellPrice =
+            parsed.sellingPrice != null
+              ? normalizeUnitPriceToBase(parsed.sellingPrice, unitConfig, unit)
+              : Number(product.price || 0);
+          const baseCostPrice =
+            parsed.costPrice != null
+              ? normalizeUnitPriceToBase(parsed.costPrice, unitConfig, unit)
+              : Number(product.costPrice || 0);
+
+          setCart((prev) => [
+            ...prev,
+            {
+              tempId: crypto.randomUUID(),
+              productId: product.id,
+              name: product.name,
+              price: deriveUnitPriceFromBase(baseSellPrice, unitConfig, unit),
+              basePrice: baseSellPrice,
+              costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, unit),
+              baseCostPrice,
+              quantity: parsed.quantity,
+              unit,
+              primaryUnit: getPrimaryUnit(unitConfig),
+              secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+              unitConversion: product.unitConversion ?? null,
+            },
+          ]);
+          return `${product.name} added to bill.`;
+        },
+      },
+      {
+        label: "Add product by name",
+        examples: ["besan", "allam paste", "b e s a n"],
+        run: ({ raw, normalized }: { raw: string; normalized: string }) => {
+          const tokens = normalized.split(" ").filter(Boolean);
+          const looksLikeSpelledLetters = tokens.length > 1 && tokens.every((token) => token.length === 1);
+          const reservedPrefixes = [
+            "search ",
+            "find ",
+            "customer ",
+            "select customer ",
+            "bill to ",
+            "to ",
+            "paid ",
+            "amount received ",
+            "date ",
+            "bill date ",
+            "open ",
+            "create product ",
+            "add product ",
+          ];
+          const reservedCommands = new Set([
+            "save",
+            "save bill",
+            "complete bill",
+            "complete order",
+            "open payment",
+            "checkout",
+            "cancel bill",
+            "clear bill",
+          ]);
+
+          if (!normalized) return null;
+          if (!looksLikeSpelledLetters) {
+            if (reservedCommands.has(normalized)) return null;
+            if (reservedPrefixes.some((prefix) => normalized.startsWith(prefix))) return null;
+          }
+
+          const product = findProductByVoice(looksLikeSpelledLetters ? raw : normalized);
+          if (!product) return null;
+          const added = addExistingProductToCartByVoice(product, 1);
+          return added
+            ? `${product.name} added to bill.`
+            : `${product.name} needs a price confirmation before adding.`;
+        },
+      },
+      {
+        label: "Search products",
+        examples: ["search rice", "find besan"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^(search|find)\s+(.+)$/);
+          if (!match) return null;
+          setSearchTerm(match[2].trim());
+          return `Searching for ${match[2].trim()}.`;
+        },
+      },
+      {
+        label: "Select customer",
+        examples: ["customer pulav", "bill to famous"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^(customer|select customer|bill to|to)\s+(.+)$/);
+          if (!match) return null;
+          const customer = findCustomerByVoice(match[2].trim());
+          if (!customer) return `I could not uniquely match ${match[2].trim()}. Please use the customer dropdown.`;
+          setSelectedCustomer(customer.id);
+          return `Selected customer ${customer.name}.`;
+        },
+      },
+      {
+        label: "Set paid amount",
+        examples: ["paid 5000", "amount received 2500"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^(paid|amount received)\s+(.+)$/);
+          if (!match) return null;
+          const amount = parseSpokenAmount(match[2]);
+          if (amount == null) return "I could not understand that amount.";
+          setPaidAmount(String(amount));
+          return `Paid amount set to ${amount}.`;
+        },
+      },
+      {
+        label: "Set bill date",
+        examples: ["date 2026-04-01", "bill date 2026-04-01"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^(date|bill date)\s+(\d{4}-\d{2}-\d{2})$/);
+          if (!match) return null;
+          try {
+            setBillDate(parseISTDateOnly(match[2]));
+            setBillDateManuallyChanged(true);
+            return `Bill date set to ${match[2]}.`;
+          } catch {
+            return "That date format looks invalid.";
+          }
+        },
+      },
+      {
+        label: "Open payment",
+        examples: ["open payment", "checkout", "save"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          if (!["open payment", "checkout"].includes(normalized)) return null;
+          if (cart.length === 0) return "The current bill is empty.";
+          handleCheckout();
+          return "Opening payment.";
+        },
+      },
+      {
+        label: "Save bill directly",
+        examples: ["save", "save bill", "complete bill"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          if (!["save", "save bill", "complete bill", "complete order"].includes(normalized)) return null;
+          if (cart.length === 0) return "The current bill is empty.";
+          submitBill(Number(paidAmount || 0));
+          return "Saving bill now.";
+        },
+      },
+      {
+        label: "Cancel bill",
+        examples: ["cancel bill", "clear bill"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          if (!["cancel bill", "clear bill"].includes(normalized)) return null;
+          setConfirmCancelOpen(true);
+          return "Opening cancel confirmation.";
+        },
+      },
+    ],
+      [cart, customers, paidAmount, products, selectedCustomer],
+    );
+
+
+  const filteredProducts = useMemo(() => {
+    if (!products || !searchTerm) return products || [];
+    const lower = searchTerm.toLowerCase();
+    return products.filter(p => p.name.toLowerCase().includes(lower));
+  }, [products, searchTerm]);
+
+  const openProductPriceDialog = async (product: any) => {
+    const unitConfig = {
+      primaryUnit: product.primaryUnit,
+      secondaryUnit: product.secondaryUnit,
+      unitConversion: product.unitConversion,
+    };
+    const defaultUnit = getDefaultSalesUnit(unitConfig);
+    const basePrice = Number(product.price || 0);
+    const baseCostPrice = Number(product.costPrice || 0);
+    const defaultPrice = deriveUnitPriceFromBase(basePrice, unitConfig, defaultUnit);
+    const rememberedItem =
+      selectedCustomer != null
+        ? await fetchLastBilledItemMemory({ customerId: selectedCustomer, productId: product.id }).catch(() => null)
+        : null;
+    const rememberedUnit =
+      rememberedItem && UNIT_OPTIONS.includes(rememberedItem.unit as UnitOption)
+        ? (rememberedItem.unit as UnitOption)
+        : defaultUnit;
+    const rememberedPrice = rememberedItem?.price ?? defaultPrice;
+    const rememberedQuantity = rememberedItem?.quantity ?? 1;
+    const rememberedCostPrice = rememberedItem
+      ? normalizeUnitPriceToBase(rememberedItem.costPrice, unitConfig, rememberedUnit)
+      : baseCostPrice;
+
+    if (rememberedPrice > 0) {
+      setCart(prev => {
+        const existing = prev.find((item) =>
+          item.productId === product.id &&
+          item.unit === rememberedUnit &&
+          Math.abs(item.price - rememberedPrice) < 0.0001
         );
         if (existing) {
           return prev.map(item =>
             item.productId === product.id &&
-            item.unit === defaultUnit &&
-            Math.abs(item.price - defaultPrice) < 0.0001
-              ? { ...item, quantity: item.quantity + 1 }
+            item.unit === rememberedUnit &&
+            Math.abs(item.price - rememberedPrice) < 0.0001
+              ? { ...item, quantity: item.quantity + rememberedQuantity }
               : item
           );
         }
@@ -113,27 +1213,27 @@ export default function Pos() {
           tempId: crypto.randomUUID(),
           productId: product.id,
           name: product.name,
-          price: defaultPrice,
-          basePrice,
-          costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, defaultUnit),
-          baseCostPrice,
-          quantity: 1,
-          unit: defaultUnit,
+          price: rememberedPrice,
+          basePrice: normalizeUnitPriceToBase(rememberedPrice, unitConfig, rememberedUnit),
+          costPrice: deriveUnitPriceFromBase(rememberedCostPrice, unitConfig, rememberedUnit),
+          baseCostPrice: rememberedCostPrice,
+          quantity: rememberedQuantity,
+          unit: rememberedUnit,
           primaryUnit: getPrimaryUnit(unitConfig),
           secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
           unitConversion: product.unitConversion ?? null,
         }];
       });
-      setSearchTerm("");
       return;
     }
 
     setPendingProduct({
       productId: product.id,
       name: product.name,
-      price: defaultPrice.toString(),
-      baseCostPrice,
-      unit: defaultUnit,
+      price: rememberedPrice.toString(),
+      quantity: rememberedQuantity.toString(),
+      baseCostPrice: rememberedCostPrice,
+      unit: rememberedUnit,
       primaryUnit: getPrimaryUnit(unitConfig),
       secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
       unitConversion: product.unitConversion ?? null,
@@ -149,6 +1249,7 @@ export default function Pos() {
       unitConversion: pendingProduct.unitConversion,
     };
     const nextPrice = Math.max(0, Number(pendingProduct.price || 0));
+    const nextQuantity = Math.max(1, Number(pendingProduct.quantity || 1));
     const nextBasePrice = normalizeUnitPriceToBase(nextPrice, unitConfig, pendingProduct.unit);
 
     setCart(prev => {
@@ -162,7 +1263,7 @@ export default function Pos() {
           item.productId === pendingProduct.productId &&
           item.unit === pendingProduct.unit &&
           Math.abs(item.price - nextPrice) < 0.0001
-            ? { ...item, quantity: item.quantity + 1 } 
+            ? { ...item, quantity: item.quantity + nextQuantity } 
             : item
         );
       }
@@ -174,7 +1275,7 @@ export default function Pos() {
         basePrice: nextBasePrice,
         costPrice: deriveUnitPriceFromBase(pendingProduct.baseCostPrice, unitConfig, pendingProduct.unit),
         baseCostPrice: pendingProduct.baseCostPrice,
-        quantity: 1,
+        quantity: nextQuantity,
         unit: pendingProduct.unit,
         primaryUnit: pendingProduct.primaryUnit,
         secondaryUnit: pendingProduct.secondaryUnit ?? null,
@@ -182,26 +1283,80 @@ export default function Pos() {
       }];
     });
     setPendingProduct(null);
-    setSearchTerm("");
   };
 
   const addCustomItem = () => {
-    if (!customItem.name || !customItem.price) return;
-    setCart(prev => [...prev, {
-      tempId: crypto.randomUUID(),
-      name: customItem.name,
-      price: Number(customItem.price),
-      basePrice: Number(customItem.price),
-      costPrice: 0, // Default cost price to 0 for custom items
-      baseCostPrice: 0,
-      quantity: Number(customItem.quantity),
-      unit: customItem.unit,
-      primaryUnit: customItem.unit,
-      secondaryUnit: null,
-      unitConversion: null,
-    }]);
-    setCustomItem({ name: "", price: "", quantity: "1", unit: "PCS" });
-    setIsCustomItemOpen(false);
+    const trimmedName = customItem.name.trim();
+    const price = Number(customItem.price);
+    const costPrice = Number(customItem.costPrice);
+    const quantity = Number(customItem.quantity || 1);
+
+    if (!trimmedName) {
+      toast({ title: "Item name required", description: "Enter a custom item name.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      toast({ title: "Invalid price", description: "Enter a valid custom item price.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(costPrice) || costPrice < 0) {
+      toast({ title: "Invalid cost price", description: "Enter a valid custom item cost price.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      toast({ title: "Invalid quantity", description: "Quantity must be greater than zero.", variant: "destructive" });
+      return;
+    }
+
+    const appendCustomItem = (productId?: number) => {
+      setCart(prev => [...prev, {
+        tempId: crypto.randomUUID(),
+        productId,
+        name: trimmedName,
+        price,
+        basePrice: price,
+        costPrice,
+        baseCostPrice: costPrice,
+        quantity,
+        unit: customItem.unit,
+        primaryUnit: customItem.unit,
+        secondaryUnit: null,
+        unitConversion: null,
+      }]);
+      setCustomItem({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS", addToProducts: false });
+      setIsCustomItemOpen(false);
+    };
+
+    if (customItem.addToProducts) {
+      createProduct(
+        {
+          name: trimmedName,
+          price,
+          costPrice,
+          primaryUnit: customItem.unit,
+          secondaryUnit: null,
+          unitConversion: null,
+          stock: 0,
+          lowStockThreshold: 10,
+        },
+        {
+          onSuccess: (product) => {
+            toast({ title: "Product added", description: `${trimmedName} was added to products.` });
+            appendCustomItem(product.id);
+          },
+          onError: (error) => {
+            toast({
+              title: "Could not add product",
+              description: error instanceof Error ? error.message : "Please try again.",
+              variant: "destructive",
+            });
+          },
+        },
+      );
+      return;
+    }
+
+    appendCustomItem();
   };
 
   const updateQuantity = (tempId: string, delta: number) => {
@@ -222,6 +1377,23 @@ export default function Pos() {
       }
       return item;
     }));
+  };
+
+  const openGramQuantityPicker = (tempId: string) => {
+    const targetItem = cart.find((item) => item.tempId === tempId);
+    if (!targetItem || targetItem.unit !== "GRAMS") return;
+    setGramQuantityPickerItemId(tempId);
+  };
+
+  const applyGramQuantity = (quantity: number) => {
+    if (!gramQuantityPickerItemId) return;
+    setQuantity(gramQuantityPickerItemId, quantity);
+    setGramQuantityPickerItemId(null);
+  };
+
+  const applyCustomGramQuantity = (quantity: number) => {
+    setCustomItem((current) => ({ ...current, quantity: quantity.toString() }));
+    setIsCustomGramPickerOpen(false);
   };
 
   const setSellingPrice = (tempId: string, price: number) => {
@@ -259,6 +1431,10 @@ export default function Pos() {
       }
       return item;
     }));
+
+    if (unit !== "GRAMS") {
+      setGramQuantityPickerItemId((current) => (current === tempId ? null : current));
+    }
   };
 
   const removeFromCart = (tempId: string) => {
@@ -274,10 +1450,26 @@ export default function Pos() {
       label: charge.label.trim(),
       amountNumber: Number(charge.amount || 0),
     }))
-    .filter((charge) => charge.label && charge.amountNumber >= 0);
+    .filter((charge) => charge.label && Number.isFinite(charge.amountNumber));
+  const nonRoundOffCharges = normalizedExtraCharges.filter(
+    (charge) => charge.label.toLowerCase() !== ROUND_OFF_LABEL.toLowerCase(),
+  );
+  const baseExtraChargesTotal = nonRoundOffCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
+  const baseBillTotal = cartTotal + baseExtraChargesTotal;
+  const baseGrandTotal = baseBillTotal + oldBalance;
   const extraChargesTotal = normalizedExtraCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
   const billTotal = cartTotal + extraChargesTotal;
   const grandTotal = billTotal + oldBalance;
+  const hasDraftBill =
+    cart.length > 0 ||
+    extraCharges.length > 0 ||
+    pendingProduct !== null ||
+    customItem.name.trim().length > 0 ||
+    customItem.price.trim().length > 0 ||
+    customItem.costPrice.trim().length > 0 ||
+    selectedCustomer !== null ||
+    paidAmount.trim().length > 0;
+  const billDateLabel = billDate ? formatDate(billDate, "PPP") : "Today";
 
   const addExtraChargeRow = () => {
     setExtraCharges((prev) => [...prev, { id: crypto.randomUUID(), label: "", amount: "" }]);
@@ -293,6 +1485,47 @@ export default function Pos() {
     setExtraCharges((prev) => prev.filter((charge) => charge.id !== id));
   };
 
+  const applyRoundOff = () => {
+    const roundedTotal = Math.round(baseGrandTotal);
+    const roundOffAmount = Number((roundedTotal - baseGrandTotal).toFixed(2));
+
+    if (Math.abs(roundOffAmount) < 0.01) {
+      setExtraCharges((prev) =>
+        prev.filter((charge) => charge.label.trim().toLowerCase() !== ROUND_OFF_LABEL.toLowerCase()),
+      );
+      toast({ title: "Already rounded", description: "Grand total is already a round figure." });
+      return;
+    }
+
+    setExtraCharges((prev) => {
+      const existingIndex = prev.findIndex(
+        (charge) => charge.label.trim().toLowerCase() === ROUND_OFF_LABEL.toLowerCase(),
+      );
+
+      if (existingIndex >= 0) {
+        return prev.map((charge, index) =>
+          index === existingIndex
+            ? { ...charge, label: ROUND_OFF_LABEL, amount: roundOffAmount.toFixed(2) }
+            : charge,
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          label: ROUND_OFF_LABEL,
+          amount: roundOffAmount.toFixed(2),
+        },
+      ];
+    });
+
+    toast({
+      title: "Round off applied",
+      description: `Grand total rounded to ${formatCurrencyINR(roundedTotal)}.`,
+    });
+  };
+
   const handleCheckout = () => {
     if (cart.length === 0) {
       toast({ title: "Empty Cart", description: "Add items before checkout", variant: "destructive" });
@@ -302,17 +1535,28 @@ export default function Pos() {
     setIsPaymentOpen(true);
   };
 
-  const submitBill = () => {
-    const payment = Number(paidAmount);
+  const submitBill = (
+    paymentOverride?: number,
+    cartOverride?: CartItem[],
+    customerOverride?: number,
+  ) => {
+    const billCart = cartOverride ?? cart;
+    const billCustomerId = customerOverride ?? selectedCustomer ?? undefined;
+    const payment = paymentOverride ?? Number(paidAmount);
     if (isNaN(payment) || payment < 0) return;
-    const appliedPayment = Math.min(payment, grandTotal);
-
-    createBill({
-      customerId: selectedCustomer || undefined,
-      items: cart.map(i => ({
-        productId: i.productId,
-        name: i.name,
-        quantity: i.quantity,
+    if (billCart.length === 0) return;
+    const appliedCustomer = (customers || []).find((customer) => customer.id === billCustomerId);
+    const appliedOldBalance = Math.max(0, Number(appliedCustomer?.balance || 0));
+    const appliedCartTotal = billCart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const appliedGrandTotal = appliedCartTotal + extraChargesTotal + appliedOldBalance;
+    const appliedPayment = Math.min(payment, appliedGrandTotal);
+  
+      createBill({
+        customerId: billCustomerId,
+        items: billCart.map(i => ({
+          productId: i.productId,
+          name: i.name,
+          quantity: i.quantity,
         unit: i.unit,
         baseQuantity: toBaseQuantity(i.quantity, {
           primaryUnit: i.primaryUnit,
@@ -332,15 +1576,19 @@ export default function Pos() {
         amount: charge.amountNumber,
       })),
       paidAmount: appliedPayment,
+      paymentAccountId: appliedPayment > 0 ? paymentAccountId ?? undefined : undefined,
       date: billDate ? toISTDateTimeStringForApi(billDate) : undefined,
     }, {
       onSuccess: () => {
         toast({ title: "Bill Created", description: "Transaction saved successfully" });
-        setCart([]);
-        setExtraCharges([]);
-        setSelectedCustomer(null);
-        setBillDate(undefined);
-        setIsPaymentOpen(false);
+        clearBillDraft();
+      },
+      onError: (error) => {
+        toast({
+          title: "Could not save bill",
+          description: error instanceof Error ? error.message : "Please try again.",
+          variant: "destructive",
+        });
       }
     });
   };
@@ -350,18 +1598,15 @@ export default function Pos() {
       
       {/* Left: Cart Section */}
       <div className="flex-1 flex flex-col h-full border-r border-border relative z-0">
-        <div className="p-4 border-b border-border bg-card">
-          <div className="flex justify-between items-center mb-4">
+        <div className="p-3 border-b border-border bg-card">
+          <div className="flex justify-between items-center mb-3">
             <h2 className="font-display font-bold text-xl">Current Bill</h2>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">Bill # --</span>
-            </div>
           </div>
           
           {/* Customer Selector */}
           <div className="flex gap-2">
             <select 
-              className="flex-1 h-10 rounded-lg border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="flex-1 h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               value={selectedCustomer || ""}
               onChange={(e) => setSelectedCustomer(e.target.value ? Number(e.target.value) : null)}
             >
@@ -370,9 +1615,37 @@ export default function Pos() {
                 <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>
               ))}
             </select>
-            <Button variant="outline" size="icon" className="shrink-0" title="New Customer">
+            <Button variant="outline" size="icon" className="shrink-0 h-9 w-9" title="New Customer">
               <UserPlus className="w-4 h-4" />
             </Button>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className={cn(
+                    "h-9 justify-start text-left font-normal shrink-0",
+                    !billDate && "text-muted-foreground",
+                  )}
+                >
+                  <CalendarIcon className="mr-2 h-4 w-4" />
+                  {billDateLabel}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0">
+                <Calendar
+                  mode="single"
+                  selected={billDate}
+                  onSelect={(date) => {
+                    if (!date) return;
+                    setBillDate(date);
+                    setBillDateManuallyChanged(true);
+                  }}
+                  initialFocus
+                />
+              </PopoverContent>
+            </Popover>
           </div>
           {activeCustomer && (
             <div className="mt-2 text-xs text-muted-foreground flex justify-between px-1">
@@ -390,11 +1663,11 @@ export default function Pos() {
               <p className="text-sm">Select products to add</p>
             </div>
           ) : (
-            cart.map((item) => (
-              <div key={item.tempId} className="bg-card p-3 rounded-xl border border-border shadow-sm flex items-center justify-between group animate-in slide-in-from-left-2 duration-300">
+            [...cart].reverse().map((item) => (
+              <div key={item.tempId} className="bg-card p-2.5 rounded-xl border border-border shadow-sm flex items-center justify-between group animate-in slide-in-from-left-2 duration-300">
                 <div className="flex-1">
                   <h4 className="font-medium line-clamp-1">{item.name}</h4>
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                     <span>Selling Price</span>
                     <Input
                       type="number"
@@ -408,22 +1681,57 @@ export default function Pos() {
                     <span>/ {item.unit}</span>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <div className="font-bold font-mono">{formatCurrencyINR(item.price * item.quantity)}</div>
+                <div className="flex items-center gap-2.5">
+                  <div className="font-bold font-mono text-sm">{formatCurrencyINR(item.price * item.quantity)}</div>
                   <div className="flex items-center gap-2">
                     <div className="flex items-center border border-border rounded-lg bg-background">
                       <button 
                         onClick={() => updateQuantity(item.tempId, -1)}
                         className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium"
                       >-</button>
-                      <Input
-                        type="number"
-                        min="1"
-                        value={item.quantity}
-                        onChange={(e) => setQuantity(item.tempId, Number(e.target.value) || 1)}
-                        className="w-12 h-8 text-center text-sm font-medium border-0 focus-visible:ring-0 p-0"
-                        onFocus={(e) => e.target.select()}
-                      />
+                      <Popover
+                        open={gramQuantityPickerItemId === item.tempId}
+                        onOpenChange={(open) => {
+                          setGramQuantityPickerItemId(open ? item.tempId : null);
+                        }}
+                      >
+                        <PopoverTrigger asChild>
+                          <div>
+                            <Input
+                              type="number"
+                              min="1"
+                              value={item.quantity}
+                              onChange={(e) => setQuantity(item.tempId, Number(e.target.value) || 1)}
+                              className="w-12 h-8 text-center text-sm font-medium border-0 focus-visible:ring-0 p-0"
+                              onFocus={(e) => {
+                                e.target.select();
+                                if (item.unit === "GRAMS") {
+                                  openGramQuantityPicker(item.tempId);
+                                }
+                              }}
+                            />
+                          </div>
+                        </PopoverTrigger>
+                        {item.unit === "GRAMS" && (
+                          <PopoverContent side="top" align="center" className="w-auto p-3">
+                            <div className="mb-2 text-xs font-medium text-muted-foreground">Quick grams</div>
+                            <div className="flex flex-wrap gap-2">
+                              {GRAM_QUICK_OPTIONS.map((quantity) => (
+                                <Button
+                                  key={quantity}
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-8"
+                                  onClick={() => applyGramQuantity(quantity)}
+                                >
+                                  {quantity}g
+                                </Button>
+                              ))}
+                            </div>
+                          </PopoverContent>
+                        )}
+                      </Popover>
                       <button 
                         onClick={() => updateQuantity(item.tempId, 1)}
                         className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium"
@@ -454,68 +1762,91 @@ export default function Pos() {
         </div>
 
         {/* Totals & Actions */}
-        <div className="p-4 bg-card border-t border-border shadow-up-lg z-10">
-          <div className="space-y-3 mb-4">
-            <div className="flex justify-between items-end">
-              <span className="text-muted-foreground">This Bill Total</span>
-              <span className="text-3xl font-display font-bold text-primary">{formatCurrencyINR(cartTotal)}</span>
-            </div>
-
-            {extraCharges.map((charge) => (
-              <div key={charge.id} className="grid grid-cols-[1fr_120px_auto] gap-2 items-center">
-                <Input
-                  placeholder="Charge name"
-                  value={charge.label}
-                  onChange={(e) => updateExtraCharge(charge.id, "label", e.target.value)}
-                  className="h-9"
-                />
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.00"
-                  value={charge.amount}
-                  onChange={(e) => updateExtraCharge(charge.id, "amount", e.target.value)}
-                  className="h-9 font-mono"
-                  onFocus={(e) => e.target.select()}
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-9 w-9 text-destructive"
-                  onClick={() => removeExtraCharge(charge.id)}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </Button>
+        <div className="p-3 bg-card border-t border-border shadow-up-lg z-10">
+          <div className="space-y-2.5 mb-3">
+            <div className="grid grid-cols-3 gap-2 rounded-xl border border-border bg-muted/30 p-2.5 text-sm">
+              <div>
+                <div className="text-[11px] text-muted-foreground">Bill Total</div>
+                <div className="font-semibold font-mono">{formatCurrencyINR(billTotal)}</div>
               </div>
-            ))}
-
-            <Button type="button" variant="ghost" className="h-9 px-0 text-primary" onClick={addExtraChargeRow}>
-              <Plus className="w-4 h-4 mr-2" /> Add Extra Charge
-            </Button>
-
-            <div className="space-y-2 rounded-xl border border-border bg-muted/30 p-3 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Bill Total</span>
-                <span className="font-semibold font-mono">{formatCurrencyINR(billTotal)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Old Balance</span>
-                <span className={cn("font-semibold font-mono", oldBalance > 0 ? "text-red-500" : "text-muted-foreground")}>
+              <div>
+                <div className="text-[11px] text-muted-foreground">Old Balance</div>
+                <div className={cn("font-semibold font-mono", oldBalance > 0 ? "text-red-500" : "text-muted-foreground")}>
                   {formatCurrencyINR(oldBalance)}
-                </span>
+                </div>
               </div>
-              <div className="flex justify-between border-t border-border pt-2">
-                <span className="font-medium">Grand Total</span>
-                <span className="font-bold font-mono text-base">{formatCurrencyINR(grandTotal)}</span>
+              <div>
+                <div className="text-[11px] text-muted-foreground">Grand Total</div>
+                <div className="font-bold font-mono text-primary">{formatCurrencyINR(grandTotal)}</div>
               </div>
             </div>
+
+            <Collapsible open={chargesOpen} onOpenChange={setChargesOpen}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-muted-foreground">
+                  This Bill Total: <span className="font-semibold text-foreground">{formatCurrencyINR(cartTotal)}</span>
+                </div>
+                <CollapsibleTrigger asChild>
+                  <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-primary">
+                    <Plus className="w-4 h-4 mr-1" /> {chargesOpen ? "Hide Charges" : "Extra Charges"}
+                  </Button>
+                </CollapsibleTrigger>
+              </div>
+
+              <CollapsibleContent className="space-y-2 pt-1">
+                {extraCharges.map((charge) => (
+                  <div key={charge.id} className="grid grid-cols-[1fr_100px_auto] gap-2 items-center">
+                    <Input
+                      placeholder="Charge name"
+                      value={charge.label}
+                      onChange={(e) => updateExtraCharge(charge.id, "label", e.target.value)}
+                      className="h-8"
+                    />
+                    <Input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={charge.amount}
+                      onChange={(e) => updateExtraCharge(charge.id, "amount", e.target.value)}
+                      className="h-8 font-mono"
+                      onFocus={(e) => e.target.select()}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-destructive"
+                      onClick={() => removeExtraCharge(charge.id)}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </div>
+                ))}
+
+                <div className="flex items-center gap-3">
+                  <Button type="button" variant="ghost" size="sm" className="h-8 px-0 text-primary" onClick={addExtraChargeRow}>
+                    <Plus className="w-4 h-4 mr-2" /> Add Extra Charge
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" className="h-8 px-0 text-primary" onClick={applyRoundOff}>
+                    Round Off
+                  </Button>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 text-sm text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+              onClick={() => setConfirmCancelOpen(true)}
+              disabled={!hasDraftBill}
+            >
+              Cancel
+            </Button>
              <Dialog open={isCustomItemOpen} onOpenChange={setIsCustomItemOpen}>
              <DialogTrigger asChild>
-                <Button variant="outline" className="h-12 text-base">
+                <Button variant="outline" className="h-10 text-sm">
                   <Plus className="w-4 h-4 mr-2" /> Custom Item
                 </Button>
               </DialogTrigger>
@@ -542,10 +1873,24 @@ export default function Pos() {
                         value={customItem.price} 
                         onChange={e => setCustomItem({...customItem, price: e.target.value})}
                       />
+                      <Input 
+                        type="number" 
+                        placeholder="Cost Price" 
+                        value={customItem.costPrice} 
+                        onChange={e => setCustomItem({...customItem, costPrice: e.target.value})}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
                       <select
                         className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                         value={customItem.unit}
-                        onChange={(e) => setCustomItem({ ...customItem, unit: e.target.value as UnitOption })}
+                        onChange={(e) => {
+                          const nextUnit = e.target.value as UnitOption;
+                          setCustomItem({ ...customItem, unit: nextUnit });
+                          if (nextUnit !== "GRAMS") {
+                            setIsCustomGramPickerOpen(false);
+                          }
+                        }}
                       >
                         {UNIT_OPTIONS.map((unit) => (
                           <option key={unit} value={unit}>
@@ -553,23 +1898,64 @@ export default function Pos() {
                           </option>
                         ))}
                       </select>
+                      <Popover open={isCustomGramPickerOpen} onOpenChange={setIsCustomGramPickerOpen}>
+                        <PopoverTrigger asChild>
+                          <div>
+                            <Input 
+                              type="number" 
+                              placeholder="Qty" 
+                              value={customItem.quantity} 
+                              onChange={e => setCustomItem({...customItem, quantity: e.target.value})}
+                              onFocus={(e) => {
+                                e.target.select();
+                                if (customItem.unit === "GRAMS") {
+                                  setIsCustomGramPickerOpen(true);
+                                }
+                              }}
+                            />
+                          </div>
+                        </PopoverTrigger>
+                        {customItem.unit === "GRAMS" && (
+                          <PopoverContent side="top" align="center" className="w-auto p-3">
+                            <div className="mb-2 text-xs font-medium text-muted-foreground">Quick grams</div>
+                            <div className="flex flex-wrap gap-2">
+                              {GRAM_QUICK_OPTIONS.map((quantity) => (
+                                <Button
+                                  key={quantity}
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-8"
+                                  onClick={() => applyCustomGramQuantity(quantity)}
+                                >
+                                  {quantity}g
+                                </Button>
+                              ))}
+                            </div>
+                          </PopoverContent>
+                        )}
+                      </Popover>
                     </div>
-                    <Input 
-                      type="number" 
-                      placeholder="Qty" 
-                      value={customItem.quantity} 
-                      onChange={e => setCustomItem({...customItem, quantity: e.target.value})}
-                    />
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={customItem.addToProducts}
+                        onChange={(e) => setCustomItem({ ...customItem, addToProducts: e.target.checked })}
+                      />
+                      Add this custom item to products also
+                    </label>
                   </div>
                   <DialogFooter>
-                    <Button type="submit">Add to Cart</Button>
+                    <Button type="submit" disabled={isCreatingProduct}>
+                      {isCreatingProduct ? "Adding..." : "Add to Bill"}
+                    </Button>
                   </DialogFooter>
                 </form>
               </DialogContent>
             </Dialog>
 
             <Button 
-              className="h-12 text-base font-bold bg-primary hover:bg-primary/90 shadow-lg shadow-primary/25"
+              className="h-10 text-sm font-bold bg-primary hover:bg-primary/90 shadow-lg shadow-primary/25"
               onClick={handleCheckout}
               disabled={cart.length === 0}
             >
@@ -665,6 +2051,22 @@ export default function Pos() {
                     autoFocus
                   />
                 </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Quantity</label>
+                  <Input
+                    type="number"
+                    min="1"
+                    step="0.01"
+                    value={pendingProduct.quantity}
+                    onChange={(e) =>
+                      setPendingProduct((current) =>
+                        current ? { ...current, quantity: e.target.value } : current,
+                      )
+                    }
+                    onFocus={(e) => e.target.select()}
+                    className="h-12 text-lg font-mono"
+                  />
+                </div>
               </div>
             )}
             <DialogFooter className="gap-2 sm:gap-0">
@@ -678,6 +2080,32 @@ export default function Pos() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={confirmCancelOpen} onOpenChange={setConfirmCancelOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this bill?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will clear all items, charges, selected customer, and the saved draft for the current bill.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep Billing</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={clearBillDraft}
+            >
+              Cancel Bill
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <VoiceAssistant
+        title="Billing Voice Helper"
+        subtitle="Speak short commands to search, choose customer, set amount, or open payment."
+        commands={billingVoiceCommands}
+      />
 
       {/* Payment Dialog */}
       <Dialog open={isPaymentOpen} onOpenChange={setIsPaymentOpen}>
@@ -741,6 +2169,26 @@ export default function Pos() {
                   </span>
                 </div>
               </div>
+              {Number(paidAmount) > 0 && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Add Received Amount To Account</label>
+                  <select
+                    className="h-12 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={paymentAccountId ?? ""}
+                    onChange={(e) => setPaymentAccountId(e.target.value ? Number(e.target.value) : null)}
+                  >
+                    <option value="">Do not add to account</option>
+                    {(accounts || []).map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    If selected, the received amount will be added into that account with a note like customer money.
+                  </p>
+                </div>
+              )}
               <div className="space-y-2">
                 <label className="text-sm font-medium">Bill Date (Optional)</label>
                 <Popover>
@@ -761,7 +2209,11 @@ export default function Pos() {
                     <Calendar
                       mode="single"
                       selected={billDate}
-                      onSelect={setBillDate}
+                      onSelect={(date) => {
+                        if (!date) return;
+                        setBillDate(date);
+                        setBillDateManuallyChanged(true);
+                      }}
                       initialFocus
                     />
                   </PopoverContent>
@@ -771,7 +2223,6 @@ export default function Pos() {
             <DialogFooter className="gap-2 sm:gap-0">
               <Button type="button" variant="outline" onClick={() => {
                 setIsPaymentOpen(false);
-                setBillDate(undefined);
               }}>Cancel</Button>
               <Button type="submit" disabled={isSaving} className="bg-green-600 hover:bg-green-700 text-white w-full sm:w-auto">
                 {isSaving ? "Saving..." : "Complete Order"}

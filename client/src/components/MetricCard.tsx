@@ -9,12 +9,14 @@ interface MetricCardProps {
   trendUp?: boolean;
   className?: string;
   subValue?: string;
+  clickable?: boolean;
 }
 
-export function MetricCard({ title, value, icon, trend, trendUp, className, subValue }: MetricCardProps) {
+export function MetricCard({ title, value, icon, trend, trendUp, className, subValue, clickable }: MetricCardProps) {
   return (
     <div className={cn(
       "bg-card rounded-2xl p-6 border border-border/50 shadow-sm hover:shadow-md transition-all duration-300",
+      clickable && "cursor-pointer hover:-translate-y-0.5",
       className
     )}>
       <div className="flex justify-between items-start">

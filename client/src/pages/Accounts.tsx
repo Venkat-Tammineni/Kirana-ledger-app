@@ -1,10 +1,11 @@
-import { useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useLocation } from "wouter";
 import {
   useAccounts,
   useCreateAccount,
   useSpendFromAccount,
   useAddToAccount,
+  useCustomers,
   useDeleteAccountSafe,
   useDeleteAccountForce,
   useInvestmentDetails,
@@ -26,6 +27,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ArrowRight, CircleHelp, Landmark, Minus, Plus, Trash2, Wallet } from "lucide-react";
 import { formatCurrencyINR } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
 
 type AccountSummary = { id: number; name: string; currentBalance: number; totalSpent: number };
 
@@ -97,6 +99,9 @@ function AccountCard({
   setCreditAmount,
   creditNote,
   setCreditNote,
+  creditCustomerId,
+  setCreditCustomerId,
+  customers,
   spending,
   crediting,
   deletingSafe,
@@ -123,12 +128,15 @@ function AccountCard({
   setCreditAmount: (value: string) => void;
   creditNote: string;
   setCreditNote: (value: string) => void;
+  creditCustomerId: number | null;
+  setCreditCustomerId: (value: number | null) => void;
+  customers: Array<{ id: number; name: string; phone: string }> | undefined;
   spending: boolean;
   crediting: boolean;
   deletingSafe: boolean;
   deletingForce: boolean;
   spendFromAccount: (data: { id: number; amount: number; note: string }, options: any) => void;
-  addToAccount: (data: { id: number; amount: number; note: string }, options: any) => void;
+  addToAccount: (data: { id: number; amount: number; note: string; customerId?: number }, options: any) => void;
   deleteAccountSafe: (id: number, options: any) => void;
   deleteAccountForce: (id: number, options: any) => void;
   toast: any;
@@ -137,6 +145,17 @@ function AccountCard({
   const stopCardClick = (event: MouseEvent | KeyboardEvent) => {
     event.stopPropagation();
   };
+
+  const matchingCustomers = useMemo(() => {
+    const query = creditNote.trim().toLowerCase();
+    if (!query) return customers || [];
+    const matches = (customers || []).filter(
+      (customer: { id: number; name: string; phone: string }) =>
+        customer.name.toLowerCase().includes(query) ||
+        customer.phone.toLowerCase().includes(query),
+    );
+    return matches.length > 0 ? matches : customers || [];
+  }, [creditNote, customers]);
 
   return (
     <div
@@ -185,12 +204,13 @@ function AccountCard({
               onSubmit={(e) => {
                 e.preventDefault();
                 addToAccount(
-                  { id: account.id, amount: Number(creditAmount || 0), note: creditNote },
+                  { id: account.id, amount: Number(creditAmount || 0), note: creditNote, customerId: creditCustomerId || undefined },
                   {
                     onSuccess: () => {
                       setCreditAccountId(null);
                       setCreditAmount("");
                       setCreditNote("");
+                      setCreditCustomerId(null);
                     },
                     onError: (error: Error) => toast({ title: "Failed", description: error.message, variant: "destructive" }),
                   },
@@ -208,6 +228,24 @@ function AccountCard({
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Note (Required)</label>
                   <Input value={creditNote} onChange={(e) => setCreditNote(e.target.value)} placeholder="Reason for adding amount" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Customer to deduct from (Optional)</label>
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={creditCustomerId || ""}
+                    onChange={(e) => setCreditCustomerId(e.target.value ? Number(e.target.value) : null)}
+                  >
+                    <option value="">Do not deduct customer balance</option>
+                    {matchingCustomers.map((customer) => (
+                      <option key={customer.id} value={customer.id}>
+                        {customer.name} ({customer.phone})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    If you select a customer here, the same amount will be recorded as their payment too.
+                  </p>
                 </div>
               </div>
               <DialogFooter>
@@ -345,6 +383,7 @@ function AccountCard({
 
 export default function Accounts() {
   const { data: accounts, isLoading } = useAccounts();
+  const { data: customers } = useCustomers();
   const { data: investmentDetails } = useInvestmentDetails();
   const { mutate: createAccount, isPending: creating } = useCreateAccount();
   const { mutate: spendFromAccount, isPending: spending } = useSpendFromAccount();
@@ -364,9 +403,69 @@ export default function Accounts() {
   const [creditAccountId, setCreditAccountId] = useState<number | null>(null);
   const [creditAmount, setCreditAmount] = useState("");
   const [creditNote, setCreditNote] = useState("");
+  const [creditCustomerId, setCreditCustomerId] = useState<number | null>(null);
   const [forceDeleteAccountId, setForceDeleteAccountId] = useState<number | null>(null);
 
+  const parseSpokenAmount = (value: string) => {
+    const match = value.replace(/,/g, "").match(/(\d+(?:\.\d+)?)/);
+    return match ? Number(match[1]) : null;
+  };
+
+  const accountVoiceCommands = useMemo(
+    () => [
+      {
+        label: "Open add amount",
+        examples: ["add amount", "open add amount"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          if (!["add amount", "open add amount"].includes(normalized)) return null;
+          if (!accounts?.length) return "No accounts found.";
+          setCreditAccountId(accounts[0].id);
+          return `Opening Add Amount for ${accounts[0].name}.`;
+        },
+      },
+      {
+        label: "Set amount",
+        examples: ["amount 5000"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^amount\s+(.+)$/);
+          if (!match) return null;
+          const amount = parseSpokenAmount(match[1]);
+          if (amount == null) return "I could not understand that amount.";
+          setCreditAmount(String(amount));
+          return `Amount set to ${amount}.`;
+        },
+      },
+      {
+        label: "Set note",
+        examples: ["note pulav payment"],
+        run: ({ raw, normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^note\s+(.+)$/);
+          if (!match) return null;
+          const nextNote = raw.slice(raw.toLowerCase().indexOf("note") + 4).trim();
+          setCreditNote(nextNote);
+          return "Note updated.";
+        },
+      },
+      {
+        label: "Choose customer",
+        examples: ["customer pulav"],
+        run: ({ normalized }: { raw: string; normalized: string }) => {
+          const match = normalized.match(/^customer\s+(.+)$/);
+          if (!match) return null;
+          const matches = (customers || []).filter((customer) =>
+            customer.name.toLowerCase().includes(match[1].trim()),
+          );
+          if (matches.length !== 1) return `I could not uniquely match ${match[1].trim()}. Please choose from the dropdown.`;
+          setCreditCustomerId(matches[0].id);
+          return `Selected customer ${matches[0].name}.`;
+        },
+      },
+    ],
+    [accounts, customers],
+  );
+
   return (
+    <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8 space-y-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
@@ -451,6 +550,9 @@ export default function Accounts() {
               setCreditAmount={setCreditAmount}
               creditNote={creditNote}
               setCreditNote={setCreditNote}
+              creditCustomerId={creditCustomerId}
+              setCreditCustomerId={setCreditCustomerId}
+              customers={customers}
               spending={spending}
               crediting={crediting}
               deletingSafe={deletingSafe}
@@ -471,5 +573,12 @@ export default function Accounts() {
         </div>
       )}
     </div>
+
+      <VoiceAssistant
+        title="Accounts Voice Helper"
+        subtitle="Speak commands for add amount, note, amount, and customer selection."
+        commands={accountVoiceCommands}
+      />
+    </>
   );
 }
