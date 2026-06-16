@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useRoute } from "wouter";
-import { ArrowLeft, Minus, Plus, ReceiptText, Trash2 } from "lucide-react";
-import { useAccountDetails, useAddToAccount, useCustomers, useDeleteAccountTransaction, useSpendFromAccount } from "@/hooks/use-pos";
+import { ArrowLeft, Minus, Pencil, Plus, ReceiptText, Trash2 } from "lucide-react";
+import { useAccountDetails, useAddToAccount, useCustomers, useDeleteAccountTransaction, useSpendFromAccount, useUpdateAccountTransaction } from "@/hooks/use-pos";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
+import { CustomerDeductionSelect } from "@/components/CustomerDeductionSelect";
 import { getISTDateKey, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
 import {
   AlertDialog,
@@ -31,6 +32,7 @@ export default function AccountDetails() {
   const { mutate: spendFromAccount, isPending: spending } = useSpendFromAccount();
   const { mutate: addToAccount, isPending: crediting } = useAddToAccount();
   const { mutate: deleteAccountTransaction, isPending: deletingTransaction } = useDeleteAccountTransaction();
+  const { mutate: updateAccountTransaction, isPending: updatingTransaction } = useUpdateAccountTransaction();
   const { toast } = useToast();
 
   const [entryMode, setEntryMode] = useState<"credit" | "spent" | null>(null);
@@ -41,6 +43,10 @@ export default function AccountDetails() {
   const [toDate, setToDate] = useState("");
   const [typeFilter, setTypeFilter] = useState<TransactionTypeFilter>("all");
   const [transactionToDelete, setTransactionToDelete] = useState<{ id: number; type: string; amount: number } | null>(null);
+  const [transactionToEdit, setTransactionToEdit] = useState<{ id: number; type: string; amount: number; note: string; customerId?: number | null } | null>(null);
+  const [editAmount, setEditAmount] = useState("");
+  const [editNote, setEditNote] = useState("");
+  const [editCustomerId, setEditCustomerId] = useState<number | null>(null);
 
   const parseSpokenAmount = (value: string) => {
     const match = value.replace(/,/g, "").match(/(\d+(?:\.\d+)?)/);
@@ -170,6 +176,21 @@ export default function AccountDetails() {
     return matches.length > 0 ? matches : customers || [];
   }, [customers, entryNote]);
 
+  const matchingEditCustomers = useMemo(() => {
+    const query = editNote.trim().toLowerCase();
+    if (!query) return customers || [];
+    const matches = (customers || []).filter(
+      (customer) =>
+        customer.name.toLowerCase().includes(query) ||
+        customer.phone.toLowerCase().includes(query),
+    );
+    return matches.length > 0 ? matches : customers || [];
+  }, [customers, editNote]);
+
+  const customerNameById = useMemo(() => {
+    return new Map((customers || []).map((customer) => [customer.id, customer.name]));
+  }, [customers]);
+
   const handleSubmit = () => {
     if (!details) return;
 
@@ -196,6 +217,51 @@ export default function AccountDetails() {
     spendFromAccount(
       { id: details.account.id, amount, note: entryNote || "Manual amount spent" },
       { onSuccess, onError },
+    );
+  };
+
+  const openEditTransaction = (transaction: { id: number; type: string; amount: number | string; note: string | null; customerId?: number | null }) => {
+    setTransactionToEdit({
+      id: transaction.id,
+      type: transaction.type,
+      amount: Number(transaction.amount || 0),
+      note: transaction.note || "",
+      customerId: transaction.customerId,
+    });
+    setEditAmount(String(Number(transaction.amount || 0)));
+    setEditNote(transaction.note || "");
+    setEditCustomerId(transaction.customerId || null);
+  };
+
+  const closeEditTransaction = () => {
+    setTransactionToEdit(null);
+    setEditAmount("");
+    setEditNote("");
+    setEditCustomerId(null);
+  };
+
+  const handleEditSubmit = () => {
+    if (!details || !transactionToEdit) return;
+
+    const amount = Number(editAmount);
+    const note = editNote.trim();
+    if (!amount || amount <= 0 || !note) return;
+
+    updateAccountTransaction(
+      {
+        id: details.account.id,
+        transactionId: transactionToEdit.id,
+        amount,
+        note,
+        customerId: transactionToEdit.type === "credit" ? editCustomerId : undefined,
+      },
+      {
+        onSuccess: () => {
+          toast({ title: "Transaction updated" });
+          closeEditTransaction();
+        },
+        onError: (error: Error) => toast({ title: "Failed", description: error.message, variant: "destructive" }),
+      },
     );
   };
 
@@ -335,26 +401,43 @@ export default function AccountDetails() {
                       </div>
                       <div className="text-sm text-muted-foreground">
                         <div>{txn.date ? formatDateTime(txn.date, "dd MMM, hh:mm a") : "-"}</div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="mt-2 h-8 px-2 text-destructive hover:text-destructive"
-                          onClick={() =>
-                            setTransactionToDelete({
-                              id: txn.id,
-                              type: txn.type,
-                              amount: Number(txn.amount || 0),
-                            })
-                          }
-                        >
-                          <Trash2 className="w-4 h-4 mr-1" />
-                          Delete
-                        </Button>
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2"
+                            onClick={() => openEditTransaction(txn)}
+                          >
+                            <Pencil className="w-4 h-4 mr-1" />
+                            Edit
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-destructive hover:text-destructive"
+                            onClick={() =>
+                              setTransactionToDelete({
+                                id: txn.id,
+                                type: txn.type,
+                                amount: Number(txn.amount || 0),
+                              })
+                            }
+                          >
+                            <Trash2 className="w-4 h-4 mr-1" />
+                            Delete
+                          </Button>
+                        </div>
                       </div>
                     </div>
                     <div className="mt-3 text-sm text-muted-foreground">
                       {txn.note || "-"}
+                      {txn.type === "credit" && txn.customerId && (
+                        <span className="ml-2 text-xs">
+                          Deducted from {customerNameById.get(txn.customerId) || "customer"}
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -402,18 +485,11 @@ export default function AccountDetails() {
               {entryMode === "credit" && (
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Customer to deduct from (Optional)</label>
-                  <select
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={entryCustomerId || ""}
-                    onChange={(e) => setEntryCustomerId(e.target.value ? Number(e.target.value) : null)}
-                  >
-                    <option value="">Do not deduct customer balance</option>
-                    {matchingCustomers.map((customer) => (
-                      <option key={customer.id} value={customer.id}>
-                        {customer.name} ({customer.phone})
-                      </option>
-                    ))}
-                  </select>
+                  <CustomerDeductionSelect
+                    customers={matchingCustomers}
+                    value={entryCustomerId}
+                    onChange={setEntryCustomerId}
+                  />
                   <p className="text-xs text-muted-foreground">
                     Select the customer if this amount is money received from them.
                   </p>
@@ -431,6 +507,59 @@ export default function AccountDetails() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={transactionToEdit !== null} onOpenChange={(open) => !open && closeEditTransaction()}>
+        <DialogContent>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleEditSubmit();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Edit {transactionToEdit?.type === "credit" ? "Added Amount" : "Spent Amount"}</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Amount</label>
+                <Input
+                  type="number"
+                  value={editAmount}
+                  onChange={(e) => setEditAmount(e.target.value)}
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Note</label>
+                <Input
+                  value={editNote}
+                  onChange={(e) => setEditNote(e.target.value)}
+                  placeholder="Payment note"
+                />
+              </div>
+              {transactionToEdit?.type === "credit" && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Customer to deduct from (Optional)</label>
+                  <CustomerDeductionSelect
+                    customers={matchingEditCustomers}
+                    value={editCustomerId}
+                    onChange={setEditCustomerId}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Choose the customer whose balance should be reduced by this payment.
+                  </p>
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button type="submit" disabled={updatingTransaction || !editAmount || !editNote.trim()}>
+                {updatingTransaction ? "Saving..." : "Save Changes"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog open={!!transactionToDelete} onOpenChange={(open) => !open && setTransactionToDelete(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>

@@ -17,6 +17,7 @@ import { useConvertQuotationToBill, useQuotation, useUpdateQuotationStatus } fro
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
+import { formatBillLabel } from "@shared/billing";
 
 function escapePdfText(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
@@ -335,7 +336,7 @@ export default function QuotationDetails() {
   const handleConvert = () => {
     convertToBill(id, {
       onSuccess: (result) => {
-        toast({ title: "Quotation converted", description: `Bill #${result.bill.id} created successfully.` });
+        toast({ title: "Quotation converted", description: `${formatBillLabel(result.bill)} created successfully.` });
         setConfirmOpen(false);
         setLocation(`/bills/${result.bill.id}`);
       },

@@ -16,7 +16,6 @@ import AccountInvestmentDetails from "@/pages/AccountInvestmentDetails";
 import Staff from "@/pages/Staff";
 import Inventory from "@/pages/Inventory";
 import Reporting from "@/pages/Reporting";
-import AdvancedReports from "@/pages/advancedReports";
 import Bills from "@/pages/Bills";
 import BillDetails from "@/pages/BillDetails";
 import BillEdit from "@/pages/BillEdit";
@@ -24,7 +23,6 @@ import Quotations from "@/pages/Quotations";
 import QuotationCreate from "@/pages/QuotationCreate";
 import QuotationEdit from "@/pages/QuotationEdit";
 import QuotationDetails from "@/pages/QuotationDetails";
-import Ops from "@/pages/Ops";
 import NotFound from "@/pages/not-found";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
 
@@ -42,8 +40,6 @@ function Router() {
       <Route path="/staff" component={Staff} />
       <Route path="/inventory" component={Inventory} />
       <Route path="/reporting" component={Reporting} />
-      <Route path="/advanced-reports" component={AdvancedReports} />
-      <Route path="/ops" component={Ops} />
       <Route path="/bills" component={Bills} />
       <Route path="/bills/:id/edit" component={BillEdit} />
       <Route path="/bills/:id" component={BillDetails} />
@@ -98,7 +94,7 @@ function App() {
       <TooltipProvider>
         <div className="flex min-h-screen bg-background font-sans text-foreground">
           <Sidebar />
-          <main className="flex-1 overflow-x-hidden">
+          <main className="min-w-0 flex-1 overflow-x-hidden">
             <Router />
           </main>
           <MobileNav />

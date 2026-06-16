@@ -1,8 +1,8 @@
 
 import { db } from "./db";
 import {
-  customers, products, bills, billItems, billCharges, quotations, quotationItems, quotationCharges, payments, customerProfitAdjustments, ledgerEntries, stockAdjustments, accounts, staff, staffAttendance, accountTransactions, investmentEntries,
-  type Customer, type Product, type Bill, type BillItem, type BillCharge, type Quotation, type QuotationItem, type QuotationCharge, type Payment, type CustomerProfitAdjustment, type LedgerEntry, type StockAdjustment, type Account, type Staff, type StaffAttendance, type AccountTransaction, type InvestmentEntry,
+  customers, products, bills, billItems, billCharges, quotations, quotationItems, quotationCharges, payments, customerProfitAdjustments, ledgerEntries, stockAdjustments, accounts, staff, staffAttendance, staffSalaryPayments, accountTransactions, investmentEntries, investmentEntryPurchases, accountTransactionPurchases,
+  type Customer, type Product, type Bill, type BillItem, type BillCharge, type Quotation, type QuotationItem, type QuotationCharge, type Payment, type CustomerProfitAdjustment, type LedgerEntry, type StockAdjustment, type Account, type Staff, type StaffAttendance, type StaffSalaryPayment, type AccountTransaction, type InvestmentEntry, type InvestmentEntryPurchase, type AccountTransactionPurchase,
   type CreateBillRequest,
   type UpdateBillRequest,
   type CreateQuotationRequest,
@@ -15,6 +15,9 @@ import { getISTDateKey, getISTDayBounds, getISTMonthBounds, parseISTDateTime } f
 
 const LEDGER_TABLE_NAME = "ledger_entries";
 const MIRCHI_POWDER_ITEM_NAME = "mirchi powder";
+const STAFF_SALARY_PAYMENTS_TABLE_NAME = "staff_salary_payments";
+
+type AccountTransactionWithCustomer = AccountTransaction & { customerId?: number | null };
 
 function isMissingLedgerTableError(error: unknown): boolean {
   return isMissingTableError(error, LEDGER_TABLE_NAME);
@@ -86,6 +89,27 @@ type StaffSummary = {
   todayPayment: number;
 };
 
+type StaffSalaryPaymentView = {
+  id: number;
+  staffId: number;
+  rangeStart: string;
+  rangeEnd: string;
+  amount: number;
+  note: string | null;
+};
+
+function getMonthlyDailySalary(staffRecord: Pick<Staff, "salaryAmount">) {
+  return Number(staffRecord.salaryAmount || 0) / 30;
+}
+
+function getAttendancePaymentForStaff(staffRecord: Pick<Staff, "salaryType" | "salaryAmount">, entry: StaffAttendance) {
+  if (staffRecord.salaryType === "monthly") {
+    return entry.status === "present" ? getMonthlyDailySalary(staffRecord) : 0;
+  }
+
+  return Number(entry.payment || 0);
+}
+
 type MirchiPowderTotals = {
   sales: number;
   profit: number;
@@ -112,22 +136,87 @@ function parseAccountLinkedPaymentNote(note: string | null | undefined) {
   };
 }
 
+function getOldBalancePaymentNote(billId: number) {
+  return `Old balance payment during bill #${billId}`;
+}
+
+function getOldBalancePaymentBillId(note: string | null | undefined) {
+  const match = note?.match(/^Old balance payment during bill #(\d+)$/i);
+  return match ? Number(match[1]) : null;
+}
+
+function getReceivedDuringBillNote(billId: number) {
+  return `Received during Bill #${billId}`;
+}
+
+function getMissingStoredBillPayments(
+  billRows: Array<{
+    id: number;
+    customerId: number | null;
+    billPaidAmount: unknown;
+    oldBalancePaidAmount: unknown;
+  }>,
+  paymentRows: Array<{
+    customerId: number;
+    billId: number | null;
+    amount: unknown;
+    note: string | null;
+  }>,
+) {
+  const paidByBillId = new Map<number, number>();
+  const paidByCustomerAndOldBalanceNote = new Map<string, number>();
+  const missingByCustomer = new Map<number, number>();
+
+  for (const payment of paymentRows) {
+    const amount = Number(payment.amount || 0);
+    if (payment.billId) {
+      paidByBillId.set(payment.billId, (paidByBillId.get(payment.billId) ?? 0) + amount);
+    }
+    if (payment.note) {
+      const key = `${payment.customerId}:${payment.note}`;
+      paidByCustomerAndOldBalanceNote.set(key, (paidByCustomerAndOldBalanceNote.get(key) ?? 0) + amount);
+    }
+  }
+
+  for (const bill of billRows) {
+    if (bill.customerId == null) continue;
+
+    const storedPaid = Number(bill.billPaidAmount || 0) + Number(bill.oldBalancePaidAmount || 0);
+    if (storedPaid <= 0) continue;
+
+    const oldBalanceNoteKey = `${bill.customerId}:${getOldBalancePaymentNote(bill.id)}`;
+    const persistedPaid =
+      (paidByBillId.get(bill.id) ?? 0) +
+      (paidByCustomerAndOldBalanceNote.get(oldBalanceNoteKey) ?? 0);
+    const missingPaid = Math.max(0, storedPaid - persistedPaid);
+
+    if (missingPaid > 0) {
+      missingByCustomer.set(bill.customerId, (missingByCustomer.get(bill.customerId) ?? 0) + missingPaid);
+    }
+  }
+
+  return missingByCustomer;
+}
+
 export interface IStorage {
   // Staff
   getStaff(): Promise<(Staff & { presentDays: number; absentDays: number; totalPayment: number; thisMonthPayable: number; todayStatus: "present" | "absent" | null; todayPayment: number })[]>;
-  getStaffDetails(id: number): Promise<{ staff: Staff; summary: StaffSummary; attendance: StaffAttendance[] } | undefined>;
+  getStaffDetails(id: number): Promise<{ staff: Staff; summary: StaffSummary; attendance: StaffAttendance[]; payments: StaffSalaryPaymentView[] } | undefined>;
   createStaff(data: Omit<Staff, "id" | "createdAt" | "overallPaymentAdjustment">): Promise<Staff>;
   markStaffAttendance(id: number, input: { date?: Date; status: "present" | "absent"; payment?: number }): Promise<StaffAttendance>;
   updateStaffTodayPayment(id: number, payment: number, date?: Date): Promise<StaffAttendance>;
   updateStaffOverallPayment(id: number, totalPayment: number): Promise<{ staffId: number; totalPayment: number; overallAdjustment: number }>;
+  updateStaffSalary(id: number, input: { salaryType: "daily" | "monthly"; salaryAmount: number; applyToRange?: boolean; rangeStart?: Date; rangeEnd?: Date }): Promise<Staff>;
+  upsertStaffSalaryPayment(id: number, input: { rangeStart: Date; rangeEnd: Date; amount: number; note?: string }): Promise<StaffSalaryPaymentView>;
 
   // Accounts
   getAccounts(): Promise<(Account & { currentBalance: number; totalSpent: number })[]>;
   getAccount(id: number): Promise<Account | undefined>;
-  getAccountDetails(id: number): Promise<{ account: Account; currentBalance: number; totalSpent: number; transactions: AccountTransaction[] } | undefined>;
+  getAccountDetails(id: number): Promise<{ account: Account; currentBalance: number; totalSpent: number; transactions: AccountTransactionWithCustomer[] } | undefined>;
   createAccount(account: Omit<Account, "id" | "createdAt">): Promise<Account>;
-  spendFromAccount(id: number, amount: number, note: string): Promise<AccountTransaction>;
+  spendFromAccount(id: number, amount: number, note: string, date?: Date, purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>): Promise<AccountTransaction>;
   addToAccount(id: number, amount: number, note: string, customerId?: number): Promise<AccountTransaction>;
+  updateAccountTransaction(accountId: number, transactionId: number, input: { amount: number; note: string; customerId?: number | null }): Promise<AccountTransaction>;
   deleteAccountTransaction(accountId: number, transactionId: number): Promise<void>;
   deleteAccountSafe(id: number): Promise<void>;
   deleteAccountForce(id: number): Promise<void>;
@@ -143,6 +232,7 @@ export interface IStorage {
     date?: Date;
     purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>;
   }): Promise<InvestmentEntry>;
+  deleteInvestmentEntry(id: number): Promise<void>;
 
   // Customers
   getCustomers(search?: string): Promise<(Customer & {
@@ -154,7 +244,7 @@ export interface IStorage {
     daysSinceLastPayment: number | null;
   })[]>;
   getCustomer(id: number): Promise<Customer | undefined>;
-  getCustomerStats(id: number, profitDate?: Date): Promise<CustomerStats>;
+  getCustomerStats(id: number, profitDate?: Date, startDate?: Date, endDate?: Date): Promise<CustomerStats>;
   getCustomerHistory(id: number): Promise<{ type: 'bill' | 'payment', date: string, amount: number, id: number }[]>;
   getCustomerLedger(id: number): Promise<CustomerLedgerView[]>;
   createCustomer(customer: Omit<Customer, "id" | "createdAt">): Promise<Customer>;
@@ -182,6 +272,7 @@ export interface IStorage {
   // Bills
   getBills(): Promise<(Bill & { customerName: string | null })[]>;
   getBill(id: number): Promise<(Bill & { items: BillItem[]; charges: BillCharge[]; customer: Customer | null }) | undefined>;
+  getPreviousBillForCustomer(customerId: number): Promise<(Bill & { items: BillItem[]; charges: BillCharge[] }) | undefined>;
   getLastBilledItemMemory(
     customerId: number,
     lookup: { productId?: number; name?: string },
@@ -225,9 +316,31 @@ export interface IStorage {
       unit: string;
       totalSales: number;
       totalProfit: number;
+      details: Array<{
+        billId: number;
+        date: Date | string;
+        quantity: number;
+        unit: string;
+        rate: number;
+        sales: number;
+        profit: number;
+      }>;
     }>;
   }>;
-  getCustomerProfitReport(startDate: Date, endDate: Date): Promise<Array<{ customerId: number | null; customerName: string; totalSales: number; totalProfit: number }>>;
+  getCustomerProfitReport(startDate: Date, endDate: Date): Promise<Array<{
+    customerId: number | null;
+    customerName: string;
+    totalSales: number;
+    totalProfit: number;
+    items: Array<{
+      productId: number | null;
+      itemName: string;
+      quantity: number;
+      unit: string;
+      totalSales: number;
+      totalProfit: number;
+    }>;
+  }>>;
   
   // Inventory/Stock
   adjustStock(productId: number, quantity: number, type: 'purchase' | 'sale' | 'adjustment' | 'damage' | 'return', reason?: string, billId?: number): Promise<StockAdjustment>;
@@ -242,14 +355,23 @@ export class DatabaseStorage implements IStorage {
     return sql`lower(trim(${billItems.name})) = ${MIRCHI_POWDER_ITEM_NAME}`;
   }
 
+  private getCurrentCostProfitExpression() {
+    return sql`
+      coalesce(${billItems.subtotal}, ${billItems.price} * ${billItems.quantity})::numeric
+      - coalesce(${billItems.costPrice}, 0)::numeric * ${billItems.quantity}
+    `;
+  }
+
   private async getMirchiPowderTotalsForRange(startDate: Date, endDate: Date): Promise<MirchiPowderTotals> {
+    const currentCostProfit = this.getCurrentCostProfitExpression();
     const [row] = await db
       .select({
         sales: sum(billItems.subtotal),
-        profit: sum(sql`(${billItems.price} - coalesce(${billItems.costPrice}, 0)) * ${billItems.quantity}`),
+        profit: sum(currentCostProfit),
       })
       .from(billItems)
       .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(
         and(
           eq(bills.status, "completed"),
@@ -280,17 +402,58 @@ export class DatabaseStorage implements IStorage {
     return Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
   }
 
+  private async getCurrentLedgerBalance(customerId: number): Promise<number | undefined> {
+    const ledger = await this.getCustomerLedger(customerId);
+    return ledger[0]?.runningBalance;
+  }
+
+  private async getCustomerLedgerSummary(customerId: number): Promise<{
+    totalGiven: number;
+    totalReceived: number;
+    balance: number;
+  } | undefined> {
+    const ledger = await this.getCustomerLedger(customerId);
+    if (ledger.length === 0) return undefined;
+
+    return {
+      totalGiven: ledger
+        .filter((entry) => entry.type === "CREDIT")
+        .reduce((sum, entry) => sum + Number(entry.amount || 0), 0),
+      totalReceived: ledger
+        .filter((entry) => entry.type === "PAYMENT")
+        .reduce((sum, entry) => sum + Number(entry.amount || 0), 0),
+      balance: Number(ledger[0]?.runningBalance || 0),
+    };
+  }
+
   private async getCustomerListSummaries(customerIds: number[]): Promise<Map<number, CustomerListSummary>> {
     const summaries = new Map<number, CustomerListSummary>();
     if (customerIds.length === 0) return summaries;
+    const currentCostProfit = this.getCurrentCostProfitExpression();
 
     const billRows = await db
       .select({
         customerId: bills.customerId,
         totalPurchased: sum(bills.totalAmount),
-        totalProfit: sum(bills.totalProfit),
       })
       .from(bills)
+      .where(
+        and(
+          eq(bills.status, "completed"),
+          sql`${bills.customerId} IS NOT NULL`,
+          inArray(bills.customerId, customerIds),
+        ),
+      )
+      .groupBy(bills.customerId);
+
+    const profitRows = await db
+      .select({
+        customerId: bills.customerId,
+        totalProfit: sum(currentCostProfit),
+      })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(
         and(
           eq(bills.status, "completed"),
@@ -309,6 +472,34 @@ export class DatabaseStorage implements IStorage {
       .from(payments)
       .where(inArray(payments.customerId, customerIds))
       .groupBy(payments.customerId);
+
+    const billPaymentRows = await db
+      .select({
+        id: bills.id,
+        customerId: bills.customerId,
+        billPaidAmount: bills.billPaidAmount,
+        oldBalancePaidAmount: bills.oldBalancePaidAmount,
+      })
+      .from(bills)
+      .where(
+        and(
+          eq(bills.status, "completed"),
+          sql`${bills.customerId} IS NOT NULL`,
+          inArray(bills.customerId, customerIds),
+        ),
+      );
+
+    const paymentDetailRows = await db
+      .select({
+        customerId: payments.customerId,
+        billId: payments.billId,
+        amount: payments.amount,
+        note: payments.note,
+      })
+      .from(payments)
+      .where(inArray(payments.customerId, customerIds));
+
+    const missingStoredPayments = getMissingStoredBillPayments(billPaymentRows, paymentDetailRows);
 
     let manualCreditRows: Array<{ customerId: number; totalManualCredit: string | null }> = [];
     try {
@@ -394,13 +585,20 @@ export class DatabaseStorage implements IStorage {
       summaries.set(row.customerId, {
         totalPurchased: Number(row.totalPurchased || 0),
         totalPaid: 0,
-        totalProfit: Number(row.totalProfit || 0) + (totalProfitAdjustments.get(row.customerId) ?? 0),
+        totalProfit: totalProfitAdjustments.get(row.customerId) ?? 0,
         totalGiven: Number(row.totalPurchased || 0),
         totalReceived: 0,
         balance: Number(row.totalPurchased || 0),
         lastPaymentDate: null,
         daysSinceLastPayment: null,
       });
+    }
+
+    for (const row of profitRows) {
+      if (row.customerId == null) continue;
+      const summary = summaries.get(row.customerId);
+      if (!summary) continue;
+      summary.totalProfit = Number(row.totalProfit || 0) + (totalProfitAdjustments.get(row.customerId) ?? 0);
     }
 
     for (const row of paymentRows) {
@@ -416,11 +614,30 @@ export class DatabaseStorage implements IStorage {
       };
       const lastPaymentDate = row.lastPaymentDate ? new Date(row.lastPaymentDate).toISOString() : null;
       const totalPaid = Number(row.totalPaid || 0);
-      current.totalPaid = totalPaid;
-      current.totalReceived = totalPaid;
+      const effectivePaid = totalPaid + (missingStoredPayments.get(row.customerId) ?? 0);
+      current.totalPaid = effectivePaid;
+      current.totalReceived = effectivePaid;
       current.lastPaymentDate = lastPaymentDate;
       current.daysSinceLastPayment = this.getDaysSince(row.lastPaymentDate);
       summaries.set(row.customerId, current);
+    }
+
+    for (const [customerId, missingPaid] of Array.from(missingStoredPayments.entries())) {
+      const current = summaries.get(customerId) ?? {
+        totalPurchased: 0,
+        totalPaid: 0,
+        totalProfit: totalProfitAdjustments.get(customerId) ?? 0,
+        totalGiven: 0,
+        totalReceived: 0,
+        balance: 0,
+        lastPaymentDate: null,
+        daysSinceLastPayment: null,
+      };
+      if (!paymentRows.some((row) => row.customerId === customerId)) {
+        current.totalPaid = missingPaid;
+        current.totalReceived = missingPaid;
+        summaries.set(customerId, current);
+      }
     }
 
     for (const row of manualCreditRows) {
@@ -438,6 +655,16 @@ export class DatabaseStorage implements IStorage {
       summaries.set(row.customerId, current);
     }
 
+    const ledgerSummaries = new Map<number, { totalGiven: number; totalReceived: number; balance: number }>();
+    await Promise.all(
+      customerIds.map(async (customerId) => {
+        const ledgerSummary = await this.getCustomerLedgerSummary(customerId);
+        if (ledgerSummary) {
+          ledgerSummaries.set(customerId, ledgerSummary);
+        }
+      }),
+    );
+
     for (const customerId of customerIds) {
       const current = summaries.get(customerId) ?? {
         totalPurchased: 0,
@@ -449,9 +676,16 @@ export class DatabaseStorage implements IStorage {
         lastPaymentDate: null,
         daysSinceLastPayment: null,
       };
-      current.totalGiven = current.totalPurchased + (current.totalGiven - current.totalPurchased);
-      current.totalReceived = current.totalPaid;
-      current.balance = current.totalGiven - current.totalReceived;
+      const ledgerSummary = ledgerSummaries.get(customerId);
+      if (ledgerSummary) {
+        current.totalGiven = ledgerSummary.totalGiven;
+        current.totalReceived = ledgerSummary.totalReceived;
+        current.balance = ledgerSummary.balance;
+      } else {
+        current.totalGiven = current.totalPurchased + (current.totalGiven - current.totalPurchased);
+        current.totalReceived = current.totalPaid;
+        current.balance = current.totalGiven - current.totalReceived;
+      }
       summaries.set(customerId, current);
     }
 
@@ -495,27 +729,27 @@ export class DatabaseStorage implements IStorage {
 
   private async getStaffSummaryRecord(staffRecord: Staff): Promise<StaffSummary> {
     const attendance = await this.getAttendanceRows(staffRecord.id);
+    const salaryPayments = await this.getStaffSalaryPaymentRows(staffRecord.id);
     const presentDays = attendance.filter((entry) => entry.status === "present").length;
     const absentDays = attendance.filter((entry) => entry.status === "absent").length;
-    const attendancePaymentTotal = attendance.reduce((sum, entry) => sum + Number(entry.payment || 0), 0);
+    const attendancePaymentTotal = attendance.reduce(
+      (sum, entry) => sum + getAttendancePaymentForStaff(staffRecord, entry),
+      0,
+    );
     const { start: monthStart, end: monthEnd } = getISTMonthBounds(new Date());
     const currentMonthAttendance = attendance.filter((entry) => {
       const entryDate = new Date(entry.date);
       return entryDate >= monthStart && entryDate <= monthEnd;
     });
     const currentMonthAttendancePayment = currentMonthAttendance.reduce(
-      (sum, entry) => sum + Number(entry.payment || 0),
+      (sum, entry) => sum + getAttendancePaymentForStaff(staffRecord, entry),
       0,
     );
     const overallAdjustment = Number(staffRecord.overallPaymentAdjustment || 0);
-    const totalPayment =
-      (staffRecord.salaryType === "monthly"
-        ? Number(staffRecord.salaryAmount || 0) + attendancePaymentTotal
-        : attendancePaymentTotal) + overallAdjustment;
-    const thisMonthPayable =
-      staffRecord.salaryType === "monthly"
-        ? Number(staffRecord.salaryAmount || 0)
-        : currentMonthAttendancePayment;
+    const salaryPaymentTotal = salaryPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+    const legacyTotalPayment = attendancePaymentTotal + overallAdjustment;
+    const totalPayment = salaryPaymentTotal > 0 ? salaryPaymentTotal : legacyTotalPayment;
+    const thisMonthPayable = currentMonthAttendancePayment;
     const todayAttendance = await this.findAttendanceForDate(staffRecord.id, new Date());
 
     return {
@@ -526,7 +760,7 @@ export class DatabaseStorage implements IStorage {
       totalPayment,
       thisMonthPayable,
       todayStatus: (todayAttendance?.status as "present" | "absent" | undefined) || null,
-      todayPayment: Number(todayAttendance?.payment || 0),
+      todayPayment: todayAttendance ? getAttendancePaymentForStaff(staffRecord, todayAttendance) : 0,
     };
   }
 
@@ -548,20 +782,42 @@ export class DatabaseStorage implements IStorage {
     );
   }
 
-  async getStaffDetails(id: number): Promise<{ staff: Staff; summary: StaffSummary; attendance: StaffAttendance[] } | undefined> {
+  async getStaffDetails(id: number): Promise<{ staff: Staff; summary: StaffSummary; attendance: StaffAttendance[]; payments: StaffSalaryPaymentView[] } | undefined> {
     const [staffRecord] = await db.select().from(staff).where(eq(staff.id, id));
     if (!staffRecord) return undefined;
 
-    const [summary, attendance] = await Promise.all([
+    const [summary, attendance, payments] = await Promise.all([
       this.getStaffSummaryRecord(staffRecord),
       this.getAttendanceRows(id),
+      this.getStaffSalaryPaymentRows(id),
     ]);
 
     return {
       staff: staffRecord,
       summary,
       attendance,
+      payments: payments.map((payment) => ({
+        id: payment.id,
+        staffId: payment.staffId,
+        rangeStart: payment.rangeStart.toISOString(),
+        rangeEnd: payment.rangeEnd.toISOString(),
+        amount: Number(payment.amount || 0),
+        note: payment.note ?? null,
+      })),
     };
+  }
+
+  private async getStaffSalaryPaymentRows(staffId: number): Promise<StaffSalaryPayment[]> {
+    try {
+      return await db
+        .select()
+        .from(staffSalaryPayments)
+        .where(eq(staffSalaryPayments.staffId, staffId))
+        .orderBy(desc(staffSalaryPayments.rangeStart), desc(staffSalaryPayments.id));
+    } catch (error) {
+      if (isMissingTableError(error, STAFF_SALARY_PAYMENTS_TABLE_NAME)) return [];
+      throw error;
+    }
   }
 
   async createStaff(data: Omit<Staff, "id" | "createdAt" | "overallPaymentAdjustment">): Promise<Staff> {
@@ -582,8 +838,10 @@ export class DatabaseStorage implements IStorage {
     const existing = await this.findAttendanceForDate(id, attendanceDate);
     const payment =
       input.payment ??
-      (input.status === "present" && staffRecord.salaryType === "daily"
-        ? Number(staffRecord.salaryAmount || 0)
+      (input.status === "present"
+        ? staffRecord.salaryType === "monthly"
+          ? getMonthlyDailySalary(staffRecord)
+          : Number(staffRecord.salaryAmount || 0)
         : 0);
 
     if (existing) {
@@ -627,10 +885,7 @@ export class DatabaseStorage implements IStorage {
     const details = await this.getStaffDetails(id);
     if (!details) throw new Error("Staff member not found");
 
-    const baseTotal =
-      (details.staff.salaryType === "monthly"
-        ? Number(details.staff.salaryAmount || 0) + details.summary.attendancePaymentTotal
-        : details.summary.attendancePaymentTotal);
+    const baseTotal = details.summary.attendancePaymentTotal;
     const overallAdjustment = totalPayment - baseTotal;
 
     await db
@@ -645,8 +900,41 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async updateStaffSalary(id: number, input: { salaryType: "daily" | "monthly"; salaryAmount: number; applyToRange?: boolean; rangeStart?: Date; rangeEnd?: Date }): Promise<Staff> {
+    const [existing] = await db.select().from(staff).where(eq(staff.id, id));
+    if (!existing) throw new Error("Staff member not found");
+
+    const [updated] = await db
+      .update(staff)
+      .set({
+        salaryType: input.salaryType,
+        salaryAmount: input.salaryAmount.toFixed(2),
+      })
+      .where(eq(staff.id, id))
+      .returning();
+
+    if (input.salaryType === "daily" && input.applyToRange && input.rangeStart && input.rangeEnd) {
+      const { start } = this.getDayBounds(input.rangeStart);
+      const { end } = this.getDayBounds(input.rangeEnd);
+
+      await db
+        .update(staffAttendance)
+        .set({ payment: input.salaryAmount.toFixed(2) })
+        .where(
+          and(
+            eq(staffAttendance.staffId, id),
+            eq(staffAttendance.status, "present"),
+            sql`${staffAttendance.date} >= ${start}`,
+            sql`${staffAttendance.date} <= ${end}`,
+          ),
+        );
+    }
+
+    return updated;
+  }
+
   async getAccounts(): Promise<(Account & { currentBalance: number; totalSpent: number })[]> {
-    const allAccounts = await db.select().from(accounts).orderBy(desc(accounts.id));
+    const allAccounts = await db.select().from(accounts).orderBy(accounts.id);
     const enriched = await Promise.all(
       allAccounts.map(async (account) => {
         const details = await this.getAccountDetails(account.id);
@@ -665,7 +953,7 @@ export class DatabaseStorage implements IStorage {
     return account;
   }
 
-  async getAccountDetails(id: number): Promise<{ account: Account; currentBalance: number; totalSpent: number; transactions: AccountTransaction[] } | undefined> {
+  async getAccountDetails(id: number): Promise<{ account: Account; currentBalance: number; totalSpent: number; transactions: AccountTransactionWithCustomer[] } | undefined> {
     const [account] = await db.select().from(accounts).where(eq(accounts.id, id));
     if (!account) return undefined;
 
@@ -683,11 +971,32 @@ export class DatabaseStorage implements IStorage {
       .filter((t) => t.type === "credit")
       .reduce((sum, t) => sum + Number(t.amount || 0), 0);
 
+    const accountPayments = await db.select().from(payments).where(sql`${payments.note} like ${`% (received in ${account.name})`}`);
+    const transactionsWithCustomers = transactions.map((transaction) => {
+      if (transaction.type !== "credit" || !transaction.note?.trim()) return transaction;
+
+      const linkedPaymentNote = `${transaction.note.trim()} (received in ${account.name})`;
+      const matchingPayments = accountPayments.filter(
+        (payment) => payment.amount === transaction.amount && payment.note === linkedPaymentNote,
+      );
+
+      if (matchingPayments.length === 0) return transaction;
+
+      const txnDateValue = transaction.date ? new Date(transaction.date).getTime() : Number.POSITIVE_INFINITY;
+      const payment = matchingPayments.reduce((closest, current) => {
+        const currentDistance = Math.abs(new Date(current.date ?? 0).getTime() - txnDateValue);
+        const closestDistance = Math.abs(new Date(closest.date ?? 0).getTime() - txnDateValue);
+        return currentDistance < closestDistance ? current : closest;
+      });
+
+      return { ...transaction, customerId: payment.customerId };
+    });
+
     return {
       account,
       currentBalance: opening + totalCredit - totalSpent,
       totalSpent,
-      transactions,
+      transactions: transactionsWithCustomers,
     };
   }
 
@@ -699,7 +1008,13 @@ export class DatabaseStorage implements IStorage {
     return account;
   }
 
-  async spendFromAccount(id: number, amount: number, note: string): Promise<AccountTransaction> {
+  async spendFromAccount(
+    id: number,
+    amount: number,
+    note: string,
+    date?: Date,
+    purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>,
+  ): Promise<AccountTransaction> {
     return db.transaction(async (tx) => {
       const [account] = await tx.select().from(accounts).where(eq(accounts.id, id));
       if (!account) throw new Error("Account not found");
@@ -712,20 +1027,97 @@ export class DatabaseStorage implements IStorage {
       const totalCredit = transactions
         .filter((t) => t.type === "credit")
         .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-      const currentBalance = opening + totalCredit - totalSpent;
-
-      if (amount > currentBalance) {
-        throw new Error("Insufficient account balance");
-      }
 
       const [txn] = await tx.insert(accountTransactions).values({
         accountId: id,
         type: "spent",
         amount: amount.toString(),
         note,
+        date: date || new Date(),
       }).returning();
+
+      const purchaseLines = (purchases || []).filter((item) => item.quantity > 0);
+      if (purchaseLines.length > 0) {
+        const productRows = await tx
+          .select({ id: products.id, costPrice: products.costPrice })
+          .from(products)
+          .where(inArray(products.id, purchaseLines.map((item) => item.productId)));
+        const productCostPriceMap = new Map(productRows.map((row) => [row.id, row.costPrice]));
+
+        for (const purchase of purchaseLines) {
+          const previousCostPrice = productCostPriceMap.get(purchase.productId);
+          await tx.insert(accountTransactionPurchases).values({
+            accountTransactionId: txn.id,
+            productId: purchase.productId,
+            quantity: purchase.quantity,
+            costPrice: purchase.costPrice !== undefined ? purchase.costPrice.toFixed(3) : null,
+            previousCostPrice: previousCostPrice ?? null,
+          });
+
+          await adjustStockTransaction(
+            tx as any,
+            purchase.productId,
+            purchase.quantity,
+            "purchase",
+            note,
+          );
+        }
+      }
+
       return txn;
     });
+  }
+
+  async upsertStaffSalaryPayment(id: number, input: { rangeStart: Date; rangeEnd: Date; amount: number; note?: string }): Promise<StaffSalaryPaymentView> {
+    const [staffRecord] = await db.select().from(staff).where(eq(staff.id, id));
+    if (!staffRecord) throw new Error("Staff member not found");
+
+    try {
+      const existing = await db
+        .select()
+        .from(staffSalaryPayments)
+        .where(
+          and(
+            eq(staffSalaryPayments.staffId, id),
+            eq(staffSalaryPayments.rangeStart, input.rangeStart),
+            eq(staffSalaryPayments.rangeEnd, input.rangeEnd),
+          ),
+        )
+        .limit(1);
+
+      const values = {
+        staffId: id,
+        rangeStart: input.rangeStart,
+        rangeEnd: input.rangeEnd,
+        amount: input.amount.toFixed(2),
+        note: input.note?.trim() || null,
+      };
+
+      const [payment] = existing[0]
+        ? await db
+            .update(staffSalaryPayments)
+            .set(values)
+            .where(eq(staffSalaryPayments.id, existing[0].id))
+            .returning()
+        : await db
+            .insert(staffSalaryPayments)
+            .values(values)
+            .returning();
+
+      return {
+        id: payment.id,
+        staffId: payment.staffId,
+        rangeStart: payment.rangeStart.toISOString(),
+        rangeEnd: payment.rangeEnd.toISOString(),
+        amount: Number(payment.amount || 0),
+        note: payment.note ?? null,
+      };
+    } catch (error) {
+      if (isMissingTableError(error, STAFF_SALARY_PAYMENTS_TABLE_NAME)) {
+        throw new Error("Staff salary payment feature requires a database update. Run npm run db:push.");
+      }
+      throw error;
+    }
   }
 
   async addToAccount(id: number, amount: number, note: string, customerId?: number): Promise<AccountTransaction> {
@@ -779,6 +1171,134 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
+  async updateAccountTransaction(
+    accountId: number,
+    transactionId: number,
+    input: { amount: number; note: string; customerId?: number | null },
+  ): Promise<AccountTransaction> {
+    return db.transaction(async (tx) => {
+      const [account] = await tx.select().from(accounts).where(eq(accounts.id, accountId));
+      if (!account) throw new Error("Account not found");
+
+      const [txn] = await tx
+        .select()
+        .from(accountTransactions)
+        .where(and(eq(accountTransactions.id, transactionId), eq(accountTransactions.accountId, accountId)));
+
+      if (!txn) throw new Error("Transaction not found");
+
+      const oldLinkedPaymentNote = txn.note?.trim()
+        ? `${txn.note.trim()} (received in ${account.name})`
+        : null;
+      const newLinkedPaymentNote = `${input.note.trim()} (received in ${account.name})`;
+
+      const [updatedTxn] = await tx
+        .update(accountTransactions)
+        .set({
+          amount: input.amount.toString(),
+          note: input.note.trim(),
+        })
+        .where(eq(accountTransactions.id, transactionId))
+        .returning();
+
+      if (txn.type === "credit" && input.customerId) {
+        const [customer] = await tx.select().from(customers).where(eq(customers.id, input.customerId));
+        if (!customer) throw new Error("Customer not found");
+      }
+
+      if (txn.type === "credit" && oldLinkedPaymentNote && input.customerId !== undefined) {
+        const matchingPayments = await tx
+          .select()
+          .from(payments)
+          .where(and(eq(payments.amount, txn.amount), eq(payments.note, oldLinkedPaymentNote)));
+
+        if (matchingPayments.length > 0) {
+          const txnDateValue = txn.date ? new Date(txn.date).getTime() : Number.POSITIVE_INFINITY;
+          const paymentToUpdate = matchingPayments.reduce((closest, current) => {
+            const currentDistance = Math.abs(new Date(current.date ?? 0).getTime() - txnDateValue);
+            const closestDistance = Math.abs(new Date(closest.date ?? 0).getTime() - txnDateValue);
+            return currentDistance < closestDistance ? current : closest;
+          });
+
+          if (input.customerId === null) {
+            await tx.delete(payments).where(eq(payments.id, paymentToUpdate.id));
+          } else {
+            await tx
+              .update(payments)
+              .set({
+                customerId: input.customerId,
+                amount: input.amount.toString(),
+                note: newLinkedPaymentNote,
+              })
+              .where(eq(payments.id, paymentToUpdate.id));
+          }
+
+          try {
+            const matchingLedgerEntries = await tx
+              .select()
+              .from(ledgerEntries)
+              .where(
+                and(
+                  eq(ledgerEntries.customerId, paymentToUpdate.customerId),
+                  eq(ledgerEntries.type, "PAYMENT"),
+                  eq(ledgerEntries.amount, paymentToUpdate.amount),
+                  eq(ledgerEntries.note, oldLinkedPaymentNote),
+                  sql`${ledgerEntries.billId} IS NULL`,
+                ),
+              );
+
+            if (matchingLedgerEntries.length > 0) {
+              const ledgerToSave = matchingLedgerEntries.reduce((closest, current) => {
+                const currentDistance = Math.abs(new Date(current.createdAt ?? 0).getTime() - txnDateValue);
+                const closestDistance = Math.abs(new Date(closest.createdAt ?? 0).getTime() - txnDateValue);
+                return currentDistance < closestDistance ? current : closest;
+              });
+
+              if (input.customerId === null) {
+                await tx.delete(ledgerEntries).where(eq(ledgerEntries.id, ledgerToSave.id));
+              } else {
+                await tx
+                  .update(ledgerEntries)
+                  .set({
+                    customerId: input.customerId,
+                    amount: input.amount.toString(),
+                    note: newLinkedPaymentNote,
+                  })
+                  .where(eq(ledgerEntries.id, ledgerToSave.id));
+              }
+            }
+          } catch (error) {
+            if (!isMissingLedgerTableError(error)) throw error;
+          }
+        } else if (input.customerId) {
+          const paymentDate = txn.date ? new Date(txn.date) : new Date();
+          await tx.insert(payments).values({
+            customerId: input.customerId,
+            billId: null,
+            amount: input.amount.toString(),
+            note: newLinkedPaymentNote,
+            date: paymentDate,
+          });
+
+          try {
+            await tx.insert(ledgerEntries).values({
+              customerId: input.customerId,
+              type: "PAYMENT",
+              amount: input.amount.toString(),
+              note: newLinkedPaymentNote,
+              billId: null,
+              createdAt: paymentDate,
+            });
+          } catch (error) {
+            if (!isMissingLedgerTableError(error)) throw error;
+          }
+        }
+      }
+
+      return updatedTxn;
+    });
+  }
+
   async deleteAccountTransaction(accountId: number, transactionId: number): Promise<void> {
     await db.transaction(async (tx) => {
       const [account] = await tx.select().from(accounts).where(eq(accounts.id, accountId));
@@ -790,6 +1310,29 @@ export class DatabaseStorage implements IStorage {
         .where(and(eq(accountTransactions.id, transactionId), eq(accountTransactions.accountId, accountId)));
 
       if (!txn) throw new Error("Transaction not found");
+
+      const linkedPurchases = await tx
+        .select()
+        .from(accountTransactionPurchases)
+        .where(eq(accountTransactionPurchases.accountTransactionId, transactionId));
+
+      for (const purchase of linkedPurchases) {
+        const [product] = await tx.select().from(products).where(eq(products.id, purchase.productId));
+        if (!product) continue;
+
+        const currentStock = Number(product.stock || 0);
+        const reverseQuantity = Math.max(0, currentStock - Number(purchase.quantity || 0));
+
+        await tx.update(products).set({ stock: reverseQuantity.toString() }).where(eq(products.id, purchase.productId));
+
+        await tx.insert(stockAdjustments).values({
+          productId: purchase.productId,
+          quantity: -Math.abs(Number(purchase.quantity || 0)),
+          type: "adjustment",
+          reason: `Deleted account investment #${transactionId}${txn.note ? `: ${txn.note}` : ""}`,
+        });
+
+      }
 
       if (txn.type === "credit" && txn.note?.trim()) {
         const linkedPaymentNote = `${txn.note.trim()} (received in ${account.name})`;
@@ -837,6 +1380,10 @@ export class DatabaseStorage implements IStorage {
         }
       }
 
+      if (linkedPurchases.length > 0) {
+        await tx.delete(accountTransactionPurchases).where(eq(accountTransactionPurchases.accountTransactionId, transactionId));
+      }
+
       await tx.delete(accountTransactions).where(eq(accountTransactions.id, transactionId));
     });
   }
@@ -877,6 +1424,7 @@ export class DatabaseStorage implements IStorage {
     const spentTransactions = await db
       .select({
         id: accountTransactions.id,
+        accountId: accountTransactions.accountId,
         accountName: accounts.name,
         amount: accountTransactions.amount,
         note: accountTransactions.note,
@@ -899,6 +1447,7 @@ export class DatabaseStorage implements IStorage {
       ...spentTransactions.map((row) => ({
         id: row.id,
         source: "account_spent" as const,
+        accountId: row.accountId,
         sourceLabel: row.accountName,
         amount: Number(row.amount || 0),
         note: row.note ?? null,
@@ -907,6 +1456,7 @@ export class DatabaseStorage implements IStorage {
       ...manualEntries.map((row) => ({
         id: row.id,
         source: "manual" as const,
+        accountId: null,
         sourceLabel: "Manual Investment",
         amount: Number(row.amount || 0),
         note: row.note ?? null,
@@ -935,11 +1485,12 @@ export class DatabaseStorage implements IStorage {
       const purchaseLines = (data.purchases || []).filter((item) => item.quantity > 0);
       const productRows = purchaseLines.length
         ? await tx
-            .select({ id: products.id, name: products.name })
+            .select({ id: products.id, name: products.name, costPrice: products.costPrice })
             .from(products)
             .where(inArray(products.id, purchaseLines.map((item) => item.productId)))
         : [];
       const productNameMap = new Map(productRows.map((row) => [row.id, row.name]));
+      const productCostPriceMap = new Map(productRows.map((row) => [row.id, row.costPrice]));
       const purchaseSummary = purchaseLines.length
         ? purchaseLines
             .map((item) => {
@@ -959,23 +1510,64 @@ export class DatabaseStorage implements IStorage {
         .returning();
 
       for (const purchase of purchaseLines) {
-        if (purchase.costPrice !== undefined) {
-          await tx
-            .update(products)
-            .set({ costPrice: purchase.costPrice.toFixed(3) })
-            .where(eq(products.id, purchase.productId));
-        }
+        const previousCostPrice = productCostPriceMap.get(purchase.productId);
+
+        await tx.insert(investmentEntryPurchases).values({
+          investmentEntryId: entry.id,
+          productId: purchase.productId,
+          quantity: purchase.quantity,
+          costPrice: purchase.costPrice !== undefined ? purchase.costPrice.toFixed(3) : null,
+          previousCostPrice: previousCostPrice ?? null,
+        });
 
         await adjustStockTransaction(
           tx as any,
           purchase.productId,
-          Math.round(purchase.quantity),
+          purchase.quantity,
           "purchase",
           data.note,
         );
       }
 
       return entry;
+    });
+  }
+
+  async deleteInvestmentEntry(id: number): Promise<void> {
+    await db.transaction(async (tx) => {
+      const [entry] = await tx.select().from(investmentEntries).where(eq(investmentEntries.id, id));
+      if (!entry) {
+        throw new Error("Investment entry not found");
+      }
+
+      const purchaseRows = await tx
+        .select()
+        .from(investmentEntryPurchases)
+        .where(eq(investmentEntryPurchases.investmentEntryId, id));
+
+      for (const purchase of purchaseRows) {
+        const [product] = await tx.select().from(products).where(eq(products.id, purchase.productId));
+        if (!product) continue;
+
+        const currentStock = Number(product.stock || 0);
+        const reverseQuantity = Math.max(0, currentStock - Number(purchase.quantity || 0));
+
+        await tx
+          .update(products)
+          .set({ stock: reverseQuantity.toString() })
+          .where(eq(products.id, purchase.productId));
+
+        await tx.insert(stockAdjustments).values({
+          productId: purchase.productId,
+          quantity: -Math.abs(Number(purchase.quantity || 0)),
+          type: "adjustment",
+          reason: `Deleted investment #${id}${entry.note ? `: ${entry.note}` : ""}`,
+        });
+
+      }
+
+      await tx.delete(investmentEntryPurchases).where(eq(investmentEntryPurchases.investmentEntryId, id));
+      await tx.delete(investmentEntries).where(eq(investmentEntries.id, id));
     });
   }
 
@@ -1013,7 +1605,8 @@ export class DatabaseStorage implements IStorage {
     return customer;
   }
 
-  async getCustomerStats(id: number, profitDate?: Date): Promise<CustomerStats> {
+  async getCustomerStats(id: number, profitDate?: Date, startDate?: Date, endDate?: Date): Promise<CustomerStats> {
+    const currentCostProfit = this.getCurrentCostProfitExpression();
     const billSum = await db.select({ value: sum(bills.totalAmount) })
       .from(bills)
       .where(and(eq(bills.customerId, id), eq(bills.status, 'completed')));
@@ -1022,15 +1615,43 @@ export class DatabaseStorage implements IStorage {
       .from(payments)
       .where(eq(payments.customerId, id));
 
-    const profitSum = await db.select({ value: sum(bills.totalProfit) })
+    const billPaymentRows = await db
+      .select({
+        id: bills.id,
+        customerId: bills.customerId,
+        billPaidAmount: bills.billPaidAmount,
+        oldBalancePaidAmount: bills.oldBalancePaidAmount,
+      })
       .from(bills)
+      .where(and(eq(bills.customerId, id), eq(bills.status, "completed")));
+
+    const paymentDetailRows = await db
+      .select({
+        customerId: payments.customerId,
+        billId: payments.billId,
+        amount: payments.amount,
+        note: payments.note,
+      })
+      .from(payments)
+      .where(eq(payments.customerId, id));
+
+    const missingStoredPayments = getMissingStoredBillPayments(billPaymentRows, paymentDetailRows).get(id) ?? 0;
+
+    const profitSum = await db.select({ value: sum(currentCostProfit) })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(and(eq(bills.customerId, id), eq(bills.status, 'completed')));
 
     const selectedProfitDate = profitDate ? parseISTDateTime(profitDate) : new Date();
-    const { start: profitRangeStart, end: profitRangeEnd } = this.getDayBounds(selectedProfitDate);
+    const { start: selectedDayStart, end: selectedDayEnd } = this.getDayBounds(selectedProfitDate);
+    const profitRangeStart = startDate ? this.getDayBounds(parseISTDateTime(startDate)).start : selectedDayStart;
+    const profitRangeEnd = endDate ? this.getDayBounds(parseISTDateTime(endDate)).end : selectedDayEnd;
 
-    const dailyProfitSum = await db.select({ value: sum(bills.totalProfit) })
-      .from(bills)
+    const dailyProfitSum = await db.select({ value: sum(currentCostProfit) })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(
         and(
           eq(bills.customerId, id),
@@ -1063,7 +1684,7 @@ export class DatabaseStorage implements IStorage {
       .limit(1);
 
     const totalPurchased = Number(billSum[0]?.value || 0);
-    const totalPaid = Number(paymentSum[0]?.value || 0);
+    const totalPaid = Number(paymentSum[0]?.value || 0) + missingStoredPayments;
     const baseTotalProfit = Number(profitSum[0]?.value || 0);
     const todayProfit = Number(dailyProfitSum[0]?.value || 0);
     const totalGiven = totalPurchased + manualCreditTotal;
@@ -1127,15 +1748,17 @@ export class DatabaseStorage implements IStorage {
         }
       }
     
+    const ledgerSummary = await this.getCustomerLedgerSummary(id);
+
     return {
       totalPurchased,
       totalPaid,
-      balance: totalGiven - totalReceived,
+      balance: ledgerSummary?.balance ?? totalGiven - totalReceived,
         totalProfit: baseTotalProfit + totalProfitAdjustment,
         todayProfit: todayProfit + dailyProfitAdjustment,
       selectedProfitDate: selectedProfitDate.toISOString(),
-      totalGiven,
-      totalReceived,
+      totalGiven: ledgerSummary?.totalGiven ?? totalGiven,
+      totalReceived: ledgerSummary?.totalReceived ?? totalReceived,
       lastPaymentDate,
       daysSinceLastPayment,
     };
@@ -1163,6 +1786,10 @@ export class DatabaseStorage implements IStorage {
       .select({
         id: bills.id,
         amount: bills.totalAmount,
+        oldBalanceAmount: bills.oldBalanceAmount,
+        grandTotal: bills.grandTotal,
+        billPaidAmount: bills.billPaidAmount,
+        oldBalancePaidAmount: bills.oldBalancePaidAmount,
         note: sql<string>`'Bill #' || ${bills.id}`,
         createdAt: bills.date,
         billId: bills.id,
@@ -1197,6 +1824,115 @@ export class DatabaseStorage implements IStorage {
       if (!isMissingLedgerTableError(error)) throw error;
     }
 
+    const persistedPaidByBillId = new Map<number, number>();
+    const persistedPaidByOldBalanceNote = new Map<string, number>();
+    for (const payment of customerPayments) {
+      const amount = Number(payment.amount || 0);
+      if (payment.billId) {
+        persistedPaidByBillId.set(payment.billId, (persistedPaidByBillId.get(payment.billId) ?? 0) + amount);
+      }
+      if (payment.note) {
+        persistedPaidByOldBalanceNote.set(payment.note, (persistedPaidByOldBalanceNote.get(payment.note) ?? 0) + amount);
+      }
+    }
+
+    const storedPaymentFallbacks = customerBills.flatMap((bill) => {
+      const billPaidAmount = Number(bill.billPaidAmount || 0);
+      const oldBalancePaidAmount = Number(bill.oldBalancePaidAmount || 0);
+      const rows: Array<{
+        id: number;
+        customerId: number;
+        type: "PAYMENT";
+        amount: number;
+        note: string;
+        billId: number | null;
+        createdAt: string;
+      }> = [];
+
+      const missingBillPaid = Math.max(0, billPaidAmount - (persistedPaidByBillId.get(bill.id) ?? 0));
+      if (missingBillPaid > 0) {
+        rows.push({
+          id: -bill.id * 2,
+          customerId: id,
+          type: "PAYMENT",
+          amount: missingBillPaid,
+          note: "Paid at time of bill",
+          billId: bill.id,
+          createdAt: bill.createdAt?.toISOString() || "",
+        });
+      }
+
+      const oldBalanceNote = getOldBalancePaymentNote(bill.id);
+      const missingOldBalancePaid = Math.max(
+        0,
+        oldBalancePaidAmount - (persistedPaidByOldBalanceNote.get(oldBalanceNote) ?? 0),
+      );
+      if (missingOldBalancePaid > 0) {
+        rows.push({
+          id: -bill.id * 2 - 1,
+          customerId: id,
+          type: "PAYMENT",
+          amount: missingOldBalancePaid,
+          note: oldBalanceNote,
+          billId: null,
+          createdAt: bill.createdAt?.toISOString() || "",
+        });
+      }
+
+      return rows;
+    });
+
+    const rawPaymentEntries = [
+      ...customerPayments.map((entry) => ({
+        id: entry.id,
+        customerId: id,
+        type: "PAYMENT" as const,
+        amount: Number(entry.amount || 0),
+        note: entry.note ?? (entry.billId ? `Bill #${entry.billId}` : "Manual payment"),
+        billId: entry.billId,
+        createdAt: entry.createdAt?.toISOString() || "",
+      })),
+      ...storedPaymentFallbacks,
+    ];
+
+    const paymentEntries: Array<{
+      id: number;
+      customerId: number;
+      type: "PAYMENT";
+      amount: number;
+      note: string | null;
+      billId: number | null;
+      createdAt: string;
+    }> = [];
+    const billTimePaymentGroups = new Map<string, (typeof paymentEntries)[number]>();
+
+    for (const entry of rawPaymentEntries) {
+      const oldBalanceBillId = getOldBalancePaymentBillId(entry.note);
+      const billId = entry.billId ?? oldBalanceBillId;
+
+      if (!billId) {
+        paymentEntries.push({ ...entry, billId: entry.billId ?? null });
+        continue;
+      }
+
+      const groupKey = String(billId);
+      const existing = billTimePaymentGroups.get(groupKey);
+
+      if (existing) {
+        existing.amount += entry.amount;
+        existing.id = Math.min(existing.id, entry.id);
+      } else {
+        const groupedEntry = {
+          ...entry,
+          id: entry.id,
+          billId,
+          note: getReceivedDuringBillNote(billId),
+        };
+        billTimePaymentGroups.set(groupKey, groupedEntry);
+        paymentEntries.push(groupedEntry);
+      }
+    }
+
     const entries = [
       ...customerBills.map((entry) => ({
         id: entry.id,
@@ -1207,15 +1943,7 @@ export class DatabaseStorage implements IStorage {
         billId: entry.billId,
         createdAt: entry.createdAt?.toISOString() || "",
       })),
-      ...customerPayments.map((entry) => ({
-        id: entry.id,
-        customerId: id,
-        type: "PAYMENT" as const,
-        amount: Number(entry.amount || 0),
-        note: entry.note ?? (entry.billId ? `Bill #${entry.billId}` : "Manual payment"),
-        billId: entry.billId,
-        createdAt: entry.createdAt?.toISOString() || "",
-      })),
+      ...paymentEntries,
       ...manualCredits.map((entry) => ({
         id: entry.id,
         customerId: id,
@@ -1227,16 +1955,23 @@ export class DatabaseStorage implements IStorage {
       })),
     ].sort((a, b) => {
       const timeDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      return timeDiff !== 0 ? timeDiff : a.id - b.id;
+      if (timeDiff !== 0) return timeDiff;
+      if (a.type !== b.type) return a.type === "CREDIT" ? -1 : 1;
+      return a.id - b.id;
     });
 
     let runningBalance = 0;
     const rows = entries.map((entry) => {
       runningBalance += entry.type === "CREDIT" ? entry.amount : -entry.amount;
+
       return {
-        ...entry,
+        id: entry.id,
+        customerId: entry.customerId,
+        type: entry.type,
+        amount: entry.amount,
         note: entry.note ?? null,
         billId: entry.billId ?? null,
+        createdAt: entry.createdAt,
         runningBalance,
       };
     });
@@ -1385,8 +2120,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async setCustomerTotalProfit(id: number, totalProfit: number): Promise<{ customerId: number; totalProfit: number; adjustment: number }> {
-    const profitSum = await db.select({ value: sum(bills.totalProfit) })
-      .from(bills)
+    const currentCostProfit = this.getCurrentCostProfitExpression();
+    const profitSum = await db.select({ value: sum(currentCostProfit) })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(and(eq(bills.customerId, id), eq(bills.status, 'completed')));
 
     const baseTotalProfit = Number(profitSum[0]?.value || 0);
@@ -1424,8 +2162,11 @@ export class DatabaseStorage implements IStorage {
 
   async setCustomerDailyProfit(id: number, profitDate: Date, totalProfit: number): Promise<{ customerId: number; profitDate: string; totalProfit: number; adjustment: number }> {
     const { start, end } = this.getDayBounds(profitDate);
-    const profitSum = await db.select({ value: sum(bills.totalProfit) })
-      .from(bills)
+    const currentCostProfit = this.getCurrentCostProfitExpression();
+    const profitSum = await db.select({ value: sum(currentCostProfit) })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(
         and(
           eq(bills.customerId, id),
@@ -1564,8 +2305,8 @@ export class DatabaseStorage implements IStorage {
       secondaryUnit: data.secondaryUnit ?? null,
       unitConversion: data.unitConversion ?? null,
       sku: trimmedSku,
-      stock: data.stock ?? 0,
-      lowStockThreshold: data.lowStockThreshold ?? 10,
+      stock: String(data.stock ?? 0),
+      lowStockThreshold: String(data.lowStockThreshold ?? 10),
     }).returning();
     return product;
   }
@@ -1613,8 +2354,20 @@ export class DatabaseStorage implements IStorage {
     if (data.unitConversion !== undefined) updateData.unitConversion = data.unitConversion ?? null;
     if (data.sku !== undefined) updateData.sku = data.sku?.trim() || null;
     if (data.isActive !== undefined) updateData.isActive = data.isActive;
-    if (data.stock !== undefined) updateData.stock = data.stock;
-    if (data.lowStockThreshold !== undefined) updateData.lowStockThreshold = data.lowStockThreshold;
+    if (data.stock !== undefined) {
+      const stock = Number(data.stock);
+      if (!Number.isFinite(stock) || stock < 0) {
+        throw new Error("Invalid stock");
+      }
+      updateData.stock = stock.toString();
+    }
+    if (data.lowStockThreshold !== undefined) {
+      const lowStockThreshold = Number(data.lowStockThreshold);
+      if (!Number.isFinite(lowStockThreshold) || lowStockThreshold < 0) {
+        throw new Error("Invalid low stock threshold");
+      }
+      updateData.lowStockThreshold = lowStockThreshold.toString();
+    }
     
     const [product] = await db.update(products).set(updateData).where(eq(products.id, id)).returning();
     if (!product) {
@@ -1904,10 +2657,10 @@ export class DatabaseStorage implements IStorage {
       bill: bills,
       customerName: customers.name
     })
-    .from(bills)
-    .leftJoin(customers, eq(bills.customerId, customers.id))
-    .where(eq(bills.status, 'completed'))
-    .orderBy(desc(bills.date));
+      .from(bills)
+      .leftJoin(customers, eq(bills.customerId, customers.id))
+      .where(eq(bills.status, 'completed'))
+      .orderBy(desc(bills.id));
 
     return results.map(r => ({ ...r.bill, customerName: r.customerName }));
   }
@@ -1949,6 +2702,13 @@ export class DatabaseStorage implements IStorage {
 
       billPaidAmount = Number(billLinkedPayments[0]?.amount || 0);
       oldBalancePaidAmount = Number(oldBalancePayments[0]?.amount || 0);
+
+      if (billPaidAmount <= 0 && Number(bill.billPaidAmount || 0) > 0) {
+        billPaidAmount = Number(bill.billPaidAmount || 0);
+      }
+      if (oldBalancePaidAmount <= 0 && Number(bill.oldBalancePaidAmount || 0) > 0) {
+        oldBalancePaidAmount = Number(bill.oldBalancePaidAmount || 0);
+      }
     }
 
     return {
@@ -1958,6 +2718,33 @@ export class DatabaseStorage implements IStorage {
       items,
       charges,
       customer: customer || null,
+    };
+  }
+
+  async getPreviousBillForCustomer(customerId: number): Promise<(Bill & { items: BillItem[]; charges: BillCharge[] }) | undefined> {
+    const [bill] = await db
+      .select()
+      .from(bills)
+      .where(and(eq(bills.customerId, customerId), eq(bills.status, "completed")))
+      .orderBy(desc(bills.date), desc(bills.id))
+      .limit(1);
+    if (!bill) return undefined;
+
+    const items = await db
+      .select()
+      .from(billItems)
+      .where(eq(billItems.billId, bill.id))
+      .orderBy(billItems.id);
+    const charges = await db
+      .select()
+      .from(billCharges)
+      .where(eq(billCharges.billId, bill.id))
+      .orderBy(billCharges.position, billCharges.id);
+
+    return {
+      ...bill,
+      items,
+      charges,
     };
   }
 
@@ -2030,13 +2817,16 @@ export class DatabaseStorage implements IStorage {
 
   async getDashboardStats(): Promise<{ todaySales: number; todayProfit: number; mirchiPowderSales: number; mirchiPowderProfit: number; totalDue: number; activeCustomers: number }> {
     const { start: todayStart, end: todayEnd } = this.getDayBounds(new Date());
+    const currentCostProfit = this.getCurrentCostProfitExpression();
 
     const salesRes = await db.select({ value: sum(bills.totalAmount) })
       .from(bills)
       .where(and(eq(bills.status, 'completed'), sql`${bills.date} >= ${todayStart}`, sql`${bills.date} <= ${todayEnd}`));
 
-    const profitRes = await db.select({ value: sum(bills.totalProfit) })
-      .from(bills)
+    const profitRes = await db.select({ value: sum(currentCostProfit) })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(and(eq(bills.status, 'completed'), sql`${bills.date} >= ${todayStart}`, sql`${bills.date} <= ${todayEnd}`));
     const mirchiPowderTotals = await this.getMirchiPowderTotalsForRange(todayStart, todayEnd);
 
@@ -2090,6 +2880,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getTopSellingProducts(limit: number = 10): Promise<Array<{ productId: number | null; productName: string; totalQuantity: number; totalRevenue: number }>> {
+    const rankingQuantity = sql`
+      case
+        when ${products.secondaryUnit} = 'GRAMS'
+          or (${products.secondaryUnit} is null and ${products.primaryUnit} in ('KG', 'GRAMS'))
+        then coalesce(${billItems.baseQuantity}, ${billItems.quantity})::numeric / 1000
+        else coalesce(${billItems.baseQuantity}, ${billItems.quantity})::numeric
+      end
+    `;
+
     const results = await db.select({
       productId: billItems.productId,
       productName: billItems.name,
@@ -2098,9 +2897,10 @@ export class DatabaseStorage implements IStorage {
     })
       .from(billItems)
       .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(eq(bills.status, 'completed'))
       .groupBy(billItems.productId, billItems.name)
-      .orderBy(desc(sum(sql`coalesce(${billItems.baseQuantity}, ${billItems.quantity})`)))
+      .orderBy(desc(sum(rankingQuantity)))
       .limit(limit);
 
     return results.map(r => ({
@@ -2112,6 +2912,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getLeastSellingProducts(limit: number = 10): Promise<Array<{ productId: number | null; productName: string; totalQuantity: number; totalRevenue: number }>> {
+    const rankingQuantity = sql`
+      case
+        when ${products.secondaryUnit} = 'GRAMS'
+          or (${products.secondaryUnit} is null and ${products.primaryUnit} in ('KG', 'GRAMS'))
+        then coalesce(${billItems.baseQuantity}, ${billItems.quantity})::numeric / 1000
+        else coalesce(${billItems.baseQuantity}, ${billItems.quantity})::numeric
+      end
+    `;
+
     const results = await db.select({
       productId: billItems.productId,
       productName: billItems.name,
@@ -2120,9 +2929,10 @@ export class DatabaseStorage implements IStorage {
     })
       .from(billItems)
       .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(eq(bills.status, 'completed'))
       .groupBy(billItems.productId, billItems.name)
-      .orderBy(sum(sql`coalesce(${billItems.baseQuantity}, ${billItems.quantity})`))
+      .orderBy(sum(rankingQuantity))
       .limit(limit);
 
     return results.map(r => ({
@@ -2147,10 +2957,25 @@ export class DatabaseStorage implements IStorage {
       unit: string;
       totalSales: number;
       totalProfit: number;
+      details: Array<{
+        billId: number;
+        date: Date | string;
+        quantity: number;
+        unit: string;
+        rate: number;
+        sales: number;
+        profit: number;
+      }>;
     }>;
   }> {
-    // Get all completed bills in date range
-    const billsInRange = await db.select()
+    const currentCostProfit = this.getCurrentCostProfitExpression();
+    const billsInRange = await db
+      .select({
+        id: bills.id,
+        customerId: bills.customerId,
+        date: bills.date,
+        totalAmount: bills.totalAmount,
+      })
       .from(bills)
       .where(
         and(
@@ -2160,9 +2985,23 @@ export class DatabaseStorage implements IStorage {
         )
       );
     const mirchiPowderTotals = await this.getMirchiPowderTotalsForRange(startDate, endDate);
+    const [profitRow] = await db
+      .select({
+        totalProfit: sum(currentCostProfit),
+      })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
+      .where(
+        and(
+          eq(bills.status, 'completed'),
+          sql`${bills.date} >= ${startDate}`,
+          sql`${bills.date} <= ${endDate}`
+        )
+      );
 
     const totalSales = billsInRange.reduce((sum, bill) => sum + Number(bill.totalAmount || 0), 0) - mirchiPowderTotals.sales;
-    const totalProfit = billsInRange.reduce((sum, bill) => sum + Number(bill.totalProfit || 0), 0) - mirchiPowderTotals.profit;
+    const totalProfit = Number(profitRow?.totalProfit || 0) - mirchiPowderTotals.profit;
     
     // Calculate total investment (cost of goods sold)
     // Investment = Total Sales - Total Profit
@@ -2174,10 +3013,11 @@ export class DatabaseStorage implements IStorage {
       totalQuantity: sum(billItems.quantity),
       unit: billItems.unit,
       totalSales: sum(billItems.subtotal),
-      totalProfit: sum(sql`(${billItems.price} - coalesce(${billItems.costPrice}, 0)) * ${billItems.quantity}`),
+      totalProfit: sum(currentCostProfit),
     })
       .from(billItems)
       .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .leftJoin(customers, eq(bills.customerId, customers.id))
       .where(
         and(
@@ -2189,6 +3029,56 @@ export class DatabaseStorage implements IStorage {
       )
       .groupBy(bills.customerId, customers.name, billItems.unit)
       .orderBy(desc(sum(billItems.quantity)));
+
+    const mirchiPowderDetails = await db.select({
+      customerId: bills.customerId,
+      customerName: customers.name,
+      billId: bills.id,
+      date: bills.date,
+      quantity: billItems.quantity,
+      unit: billItems.unit,
+      rate: billItems.price,
+      sales: billItems.subtotal,
+      profit: currentCostProfit,
+    })
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
+      .leftJoin(customers, eq(bills.customerId, customers.id))
+      .where(
+        and(
+          eq(bills.status, 'completed'),
+          sql`${bills.date} >= ${startDate}`,
+          sql`${bills.date} <= ${endDate}`,
+          this.getMirchiPowderItemCondition(),
+        ),
+      )
+      .orderBy(desc(bills.date), desc(bills.id));
+
+    const mirchiPowderDetailsByCustomer = new Map<string, Array<{
+      billId: number;
+      date: Date | string;
+      quantity: number;
+      unit: string;
+      rate: number;
+      sales: number;
+      profit: number;
+    }>>();
+
+    for (const row of mirchiPowderDetails) {
+      const customerKey = `${row.customerId ?? "walk-in"}::${row.unit || "PCS"}`;
+      const existingDetails = mirchiPowderDetailsByCustomer.get(customerKey) ?? [];
+      existingDetails.push({
+        billId: row.billId,
+        date: row.date ?? startDate,
+        quantity: Number(row.quantity || 0),
+        unit: row.unit || "PCS",
+        rate: Number(row.rate || 0),
+        sales: Number(row.sales || 0),
+        profit: Number(row.profit || 0),
+      });
+      mirchiPowderDetailsByCustomer.set(customerKey, existingDetails);
+    }
 
     return {
       totalSales,
@@ -2204,63 +3094,100 @@ export class DatabaseStorage implements IStorage {
         unit: row.unit || "PCS",
         totalSales: Number(row.totalSales || 0),
         totalProfit: Number(row.totalProfit || 0),
+        details: mirchiPowderDetailsByCustomer.get(`${row.customerId ?? "walk-in"}::${row.unit || "PCS"}`) ?? [],
       })),
     };
   }
 
-  async getCustomerProfitReport(startDate: Date, endDate: Date): Promise<Array<{ customerId: number | null; customerName: string; totalSales: number; totalProfit: number }>> {
+  async getCustomerProfitReport(startDate: Date, endDate: Date): Promise<Array<{
+    customerId: number | null;
+    customerName: string;
+    totalSales: number;
+    totalProfit: number;
+    items: Array<{
+      productId: number | null;
+      itemName: string;
+      quantity: number;
+      unit: string;
+      totalSales: number;
+      totalProfit: number;
+    }>;
+  }>> {
+    const currentCostProfit = this.getCurrentCostProfitExpression();
     const totalsByCustomer = await db.select({
       customerId: bills.customerId,
       customerName: customers.name,
-      totalSales: sum(bills.totalAmount),
-      totalProfit: sum(bills.totalProfit),
+      totalSales: sum(billItems.subtotal),
+      totalProfit: sum(currentCostProfit),
     })
-      .from(bills)
+      .from(billItems)
+      .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .leftJoin(customers, eq(bills.customerId, customers.id))
       .where(
         and(
           eq(bills.status, 'completed'),
           sql`${bills.date} >= ${startDate}`,
-          sql`${bills.date} <= ${endDate}`
+          sql`${bills.date} <= ${endDate}`,
+          sql`not (${this.getMirchiPowderItemCondition()})`,
         )
       )
       .groupBy(bills.customerId, customers.name)
-      .orderBy(desc(sum(bills.totalProfit)));
+      .orderBy(desc(sum(currentCostProfit)));
 
-    const mirchiPowderByCustomer = await db.select({
+    const itemRows = await db.select({
       customerId: bills.customerId,
-      mirchiPowderSales: sum(billItems.subtotal),
-      mirchiPowderProfit: sum(sql`(${billItems.price} - coalesce(${billItems.costPrice}, 0)) * ${billItems.quantity}`),
+      productId: billItems.productId,
+      itemName: billItems.name,
+      unit: sql<string>`coalesce(${billItems.unit}, 'PCS')`,
+      quantity: sum(billItems.quantity),
+      totalSales: sum(billItems.subtotal),
+      totalProfit: sum(currentCostProfit),
     })
       .from(billItems)
       .innerJoin(bills, eq(billItems.billId, bills.id))
+      .leftJoin(products, eq(billItems.productId, products.id))
       .where(
         and(
           eq(bills.status, 'completed'),
           sql`${bills.date} >= ${startDate}`,
           sql`${bills.date} <= ${endDate}`,
-          this.getMirchiPowderItemCondition(),
-        ),
+          sql`not (${this.getMirchiPowderItemCondition()})`,
+        )
       )
-      .groupBy(bills.customerId);
+      .groupBy(bills.customerId, billItems.productId, billItems.name, billItems.unit)
+      .orderBy(desc(sum(currentCostProfit)));
 
-    const mirchiPowderTotalsByCustomer = new Map(
-      mirchiPowderByCustomer.map((row) => [
-        row.customerId ?? "walk-in",
-        {
-          sales: Number(row.mirchiPowderSales || 0),
-          profit: Number(row.mirchiPowderProfit || 0),
-        },
-      ]),
-    );
+    const itemsByCustomer = new Map<string | number, Array<{
+      productId: number | null;
+      itemName: string;
+      quantity: number;
+      unit: string;
+      totalSales: number;
+      totalProfit: number;
+    }>>();
+
+    for (const row of itemRows) {
+      const key = row.customerId ?? "walk-in";
+      const existingItems = itemsByCustomer.get(key) ?? [];
+      existingItems.push({
+        productId: row.productId,
+        itemName: row.itemName,
+        quantity: Number(row.quantity || 0),
+        unit: row.unit || "PCS",
+        totalSales: Number(row.totalSales || 0),
+        totalProfit: Number(row.totalProfit || 0),
+      });
+      itemsByCustomer.set(key, existingItems);
+    }
 
     return totalsByCustomer.map(r => {
-      const mirchiPowderTotals = mirchiPowderTotalsByCustomer.get(r.customerId ?? "walk-in") ?? { sales: 0, profit: 0 };
       return {
         customerId: r.customerId,
         customerName: r.customerName || 'Walk-in Customer',
-        totalSales: Number(r.totalSales || 0) - mirchiPowderTotals.sales,
-        totalProfit: Number(r.totalProfit || 0) - mirchiPowderTotals.profit,
+        totalSales: Number(r.totalSales || 0),
+        totalProfit: Number(r.totalProfit || 0),
+        items: itemsByCustomer.get(r.customerId ?? "walk-in") ?? [],
       };
     });
   }

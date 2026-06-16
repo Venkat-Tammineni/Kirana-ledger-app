@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useProducts, useCreateProduct, useUpdateProduct, useDeleteProduct } from "@/hooks/use-pos";
+import { useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
@@ -26,21 +27,27 @@ import { parseCreateProductVoiceCommand } from "@/lib/voice-commands";
 const defaultDraft: ProductDraft = {
   name: "",
   price: "",
-  priceInputUnit: "PCS",
+  priceInputUnit: "KG",
   costPrice: "",
-  costPriceInputUnit: "PCS",
-  primaryUnit: "PCS",
+  costPriceInputUnit: "KG",
+  primaryUnit: "KG",
   hasSecondaryUnit: false,
-  secondaryUnit: "KG",
+  secondaryUnit: "PCS",
   unitConversion: "",
   sku: "",
   stock: "",
-  stockInputUnit: "PCS",
+  stockInputUnit: "KG",
   lowStockThreshold: "10",
 };
 
 export default function Products() {
-  const [search, setSearch] = useState("");
+  const searchParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const initialSearch = searchParams?.get("search") ?? "";
+  const targetProductId = Number(searchParams?.get("productId"));
+  const shouldOpenEdit = searchParams?.get("edit") === "1";
+  const returnTo = searchParams?.get("returnTo") ?? "";
+  const [, setLocation] = useLocation();
+  const [search, setSearch] = useState(initialSearch);
   const { data: products, isLoading } = useProducts(search);
   const { mutate: createProduct, isPending } = useCreateProduct();
   const [isOpen, setIsOpen] = useState(false);
@@ -50,6 +57,46 @@ export default function Products() {
   const [editingProduct, setEditingProduct] = useState<(ProductDraft & { id: number }) | null>(null);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const { toast } = useToast();
+  const productCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const hasOpenedTargetEditRef = useRef(false);
+  const [highlightedProductId, setHighlightedProductId] = useState<number | null>(
+    Number.isFinite(targetProductId) ? targetProductId : null,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const nextParams = new URLSearchParams(window.location.search);
+    if (search) {
+      nextParams.set("search", search);
+    } else {
+      nextParams.delete("search");
+    }
+
+    const nextSearch = nextParams.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [search]);
+
+  useEffect(() => {
+    if (isLoading || !Number.isFinite(targetProductId)) return;
+
+    const targetElement = productCardRefs.current[targetProductId];
+    if (!targetElement) return;
+
+    targetElement.scrollIntoView({ behavior: "auto", block: "center" });
+    setHighlightedProductId(targetProductId);
+  }, [isLoading, products, targetProductId]);
+
+  useEffect(() => {
+    if (highlightedProductId === null) return;
+
+    const timeout = window.setTimeout(() => {
+      setHighlightedProductId((current) => (current === highlightedProductId ? null : current));
+    }, 2500);
+
+    return () => window.clearTimeout(timeout);
+  }, [highlightedProductId]);
 
   const productVoiceCommands = useMemo(
     () => [
@@ -162,6 +209,10 @@ export default function Products() {
       {
         onSuccess: () => {
           toast({ title: "Product updated", description: "Selling and cost price changes were saved." });
+          if (returnTo) {
+            setLocation(returnTo);
+            return;
+          }
           setIsEditOpen(false);
           setEditingProduct(null);
         },
@@ -175,6 +226,43 @@ export default function Products() {
       },
     );
   };
+
+  const openEditForProduct = (product: NonNullable<typeof products>[number]) => {
+    const unitConfig = {
+      primaryUnit: product.primaryUnit,
+      secondaryUnit: product.secondaryUnit,
+      unitConversion: product.unitConversion,
+    };
+    const defaultSalesUnit = getDefaultSalesUnit(unitConfig);
+
+    setEditingProduct({
+      id: product.id,
+      name: product.name,
+      price: String(deriveUnitPriceFromBase(Number(product.price || 0), unitConfig, defaultSalesUnit)),
+      priceInputUnit: defaultSalesUnit,
+      costPrice: String(deriveUnitPriceFromBase(Number(product.costPrice || 0), unitConfig, defaultSalesUnit)),
+      costPriceInputUnit: defaultSalesUnit,
+      primaryUnit: (product.primaryUnit || "PCS") as ProductDraft["primaryUnit"],
+      hasSecondaryUnit: hasSecondaryUnit(unitConfig),
+      secondaryUnit: (product.secondaryUnit || "KG") as ProductDraft["secondaryUnit"],
+      unitConversion: product.unitConversion ? String(product.unitConversion) : "",
+      sku: product.sku ?? "",
+      stock: String(fromBaseQuantity(Number(product.stock ?? 0), unitConfig, defaultSalesUnit)),
+      stockInputUnit: defaultSalesUnit,
+      lowStockThreshold: String(fromBaseQuantity(Number(product.lowStockThreshold ?? 10), unitConfig, defaultSalesUnit)),
+    });
+    setIsEditOpen(true);
+  };
+
+  useEffect(() => {
+    if (isLoading || !shouldOpenEdit || !Number.isFinite(targetProductId) || hasOpenedTargetEditRef.current) return;
+
+    const targetProduct = products?.find((product) => product.id === targetProductId);
+    if (!targetProduct) return;
+
+    hasOpenedTargetEditRef.current = true;
+    openEditForProduct(targetProduct);
+  }, [isLoading, products, shouldOpenEdit, targetProductId]);
 
   return (
     <>
@@ -216,6 +304,12 @@ export default function Products() {
         <Dialog
           open={isEditOpen}
           onOpenChange={(open) => {
+            if (!open && returnTo) {
+              setEditingProduct(null);
+              setIsEditOpen(false);
+              setLocation(returnTo);
+              return;
+            }
             setIsEditOpen(open);
             if (!open) setEditingProduct(null);
           }}
@@ -267,7 +361,13 @@ export default function Products() {
           {products?.map((product) => (
             <div
               key={product.id}
-              className="bg-card p-4 rounded-xl border border-border shadow-sm hover:shadow-md transition-all group"
+              ref={(element) => {
+                productCardRefs.current[product.id] = element;
+              }}
+              className={cn(
+                "bg-card p-4 rounded-xl border shadow-sm hover:shadow-md transition-all group",
+                highlightedProductId === product.id ? "border-primary ring-2 ring-primary/20" : "border-border",
+              )}
             >
               {(() => {
                 const unitConfig = {
@@ -277,16 +377,23 @@ export default function Products() {
                 };
                 const primaryUnit = getPrimaryUnit(unitConfig);
                 const baseUnit = getBaseUnit(unitConfig);
+                const isWeightDisplayInKg =
+                  baseUnit === "GRAMS" || (!hasSecondaryUnit(unitConfig) && primaryUnit === "GRAMS");
+                const displayUnit = isWeightDisplayInKg ? "KG" : getDefaultSalesUnit(unitConfig);
                 const usesTwoUnits = hasSecondaryUnit(unitConfig);
                 const basePrice = Number(product.price || 0);
                 const baseCostPrice = Number(product.costPrice || 0);
-                const primaryPrice = deriveUnitPriceFromBase(basePrice, unitConfig, primaryUnit);
-                const primaryCostPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, primaryUnit);
+                const baseProfit = basePrice - baseCostPrice;
+                const displayPrice = isWeightDisplayInKg ? basePrice * 1000 : deriveUnitPriceFromBase(basePrice, unitConfig, displayUnit);
+                const displayCostPrice = isWeightDisplayInKg ? baseCostPrice * 1000 : deriveUnitPriceFromBase(baseCostPrice, unitConfig, displayUnit);
+                const displayProfit = isWeightDisplayInKg
+                  ? baseProfit * 1000
+                  : deriveUnitPriceFromBase(baseProfit, unitConfig, displayUnit);
                 const stock = Number(product.stock || 0);
-                const displayStock = usesTwoUnits
-                  ? fromBaseQuantity(stock, unitConfig, primaryUnit)
-                  : stock;
-                const lowStockThreshold = Number(product.lowStockThreshold || 10);
+                const displayStock = isWeightDisplayInKg ? stock / 1000 : fromBaseQuantity(stock, unitConfig, displayUnit);
+                const lowStockThreshold = isWeightDisplayInKg
+                  ? Number(product.lowStockThreshold || 10) / 1000
+                  : fromBaseQuantity(Number(product.lowStockThreshold || 10), unitConfig, displayUnit);
 
                 return (
                   <>
@@ -299,7 +406,7 @@ export default function Products() {
                     <h3 className="font-semibold text-lg line-clamp-1 group-hover:text-primary transition-colors">{product.name}</h3>
                     {product.sku && <p className="text-xs text-muted-foreground mt-1">SKU: {product.sku}</p>}
                     <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span className="rounded-full bg-muted px-2 py-1">Primary: {primaryUnit}</span>
+                      <span className="rounded-full bg-muted px-2 py-1">Display: {displayUnit}</span>
                       <span className="rounded-full bg-muted px-2 py-1">Base: {baseUnit}</span>
                       {usesTwoUnits && (
                         <span className="rounded-full bg-primary/10 px-2 py-1 text-primary">
@@ -311,10 +418,10 @@ export default function Products() {
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-muted-foreground">Selling Price</span>
                         <div className="font-bold text-lg font-mono">
-                          {formatCurrencyINR(usesTwoUnits ? primaryPrice : basePrice)} / {usesTwoUnits ? primaryUnit : baseUnit}
+                          {formatCurrencyINR(displayPrice)} / {displayUnit}
                         </div>
                       </div>
-                      {usesTwoUnits && (
+                      {usesTwoUnits && displayUnit !== baseUnit && (
                         <div className="text-xs text-muted-foreground text-right">
                           Base: {formatCurrencyINR(basePrice)} / {baseUnit}
                         </div>
@@ -322,7 +429,7 @@ export default function Products() {
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-muted-foreground">Cost Price</span>
                         <div className="font-mono text-sm">
-                          {formatCurrencyINR(usesTwoUnits ? primaryCostPrice : baseCostPrice)} / {usesTwoUnits ? primaryUnit : baseUnit}
+                          {formatCurrencyINR(displayCostPrice)} / {displayUnit}
                         </div>
                       </div>
                       <div className="flex justify-between items-center">
@@ -333,7 +440,7 @@ export default function Products() {
                             stock <= lowStockThreshold ? "text-red-500" : "text-foreground",
                           )}
                         >
-                          {displayStock} {usesTwoUnits ? primaryUnit : baseUnit}
+                          {displayStock} {displayUnit}
                           {stock <= lowStockThreshold && (
                             <AlertTriangle className="inline w-3 h-3 ml-1" />
                           )}
@@ -347,7 +454,7 @@ export default function Products() {
                       <div className="flex justify-between items-center pt-1 border-t border-border/50">
                         <span className="text-xs text-muted-foreground">Profit/Base Unit</span>
                         <div className="font-mono text-sm font-semibold text-green-600">
-                          {formatCurrencyINR(basePrice - baseCostPrice)} / {baseUnit}
+                          {formatCurrencyINR(displayProfit)} / {displayUnit}
                         </div>
                       </div>
                     </div>
@@ -360,29 +467,7 @@ export default function Products() {
                     type="button"
                     className="p-2 rounded-full hover:bg-muted text-muted-foreground"
                     onClick={() => {
-                      const unitConfig = {
-                        primaryUnit: product.primaryUnit,
-                        secondaryUnit: product.secondaryUnit,
-                        unitConversion: product.unitConversion,
-                      };
-                      const defaultSalesUnit = getDefaultSalesUnit(unitConfig);
-                      setEditingProduct({
-                        id: product.id,
-                        name: product.name,
-                        price: String(deriveUnitPriceFromBase(Number(product.price || 0), unitConfig, defaultSalesUnit)),
-                        priceInputUnit: defaultSalesUnit,
-                        costPrice: String(deriveUnitPriceFromBase(Number(product.costPrice || 0), unitConfig, defaultSalesUnit)),
-                        costPriceInputUnit: defaultSalesUnit,
-                        primaryUnit: (product.primaryUnit || "PCS") as ProductDraft["primaryUnit"],
-                        hasSecondaryUnit: hasSecondaryUnit(unitConfig),
-                        secondaryUnit: (product.secondaryUnit || "KG") as ProductDraft["secondaryUnit"],
-                        unitConversion: product.unitConversion ? String(product.unitConversion) : "",
-                        sku: product.sku ?? "",
-                        stock: String(fromBaseQuantity(Number(product.stock ?? 0), unitConfig, defaultSalesUnit)),
-                        stockInputUnit: defaultSalesUnit,
-                        lowStockThreshold: String(fromBaseQuantity(Number(product.lowStockThreshold ?? 10), unitConfig, defaultSalesUnit)),
-                      });
-                      setIsEditOpen(true);
+                      openEditForProduct(product);
                     }}
                   >
                     <Pencil className="w-4 h-4" />

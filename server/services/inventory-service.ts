@@ -19,10 +19,10 @@ export async function adjustStockTransaction(
       throw new Error("Product not found");
     }
 
-    const currentStock = product.stock || 0;
+    const currentStock = Number(product.stock || 0);
     const newStock = Math.max(0, currentStock + quantity);
 
-    await tx.update(products).set({ stock: newStock }).where(eq(products.id, productId));
+    await tx.update(products).set({ stock: newStock.toString() }).where(eq(products.id, productId));
 
     const [adjustment] = await tx
       .insert(stockAdjustments)
@@ -64,13 +64,6 @@ export async function recurringPurchase(
 ) {
   const results = [];
   for (const item of items) {
-    if (item.costPrice !== undefined) {
-      await db
-        .update(products)
-        .set({ costPrice: item.costPrice.toString() })
-        .where(eq(products.id, item.productId));
-    }
-
     const adjustment = await adjustStockTransaction(
       db,
       item.productId,

@@ -15,7 +15,7 @@ import {
   type UpdateBillRequest,
 } from "@shared/schema";
 import { parseISTDateTime } from "@shared/timezone";
-import { getBaseUnit, getDefaultSalesUnit, toBaseQuantity } from "@shared/units";
+import { deriveUnitPriceFromBase, getBaseUnit, getDefaultSalesUnit, toBaseQuantity } from "@shared/units";
 
 type AppDb = NodePgDatabase<any>;
 
@@ -30,15 +30,50 @@ function isMissingLedgerTableError(error: unknown): boolean {
 }
 
 async function getCustomerOutstandingBalance(tx: AppDb, customerId: number) {
-  const [billSum] = await tx
-    .select({ value: sum(bills.totalAmount) })
+  const customerBills = await tx
+    .select({
+      id: bills.id,
+      totalAmount: bills.totalAmount,
+      billPaidAmount: bills.billPaidAmount,
+      oldBalancePaidAmount: bills.oldBalancePaidAmount,
+    })
     .from(bills)
     .where(and(eq(bills.customerId, customerId), eq(bills.status, "completed")));
 
-  const [paymentSum] = await tx
-    .select({ value: sum(payments.amount) })
+  const customerPayments = await tx
+    .select({
+      billId: payments.billId,
+      amount: payments.amount,
+      note: payments.note,
+    })
     .from(payments)
     .where(eq(payments.customerId, customerId));
+
+  const totalBilled = customerBills.reduce((total, bill) => total + Number(bill.totalAmount || 0), 0);
+  const totalPaid = customerPayments.reduce((total, payment) => total + Number(payment.amount || 0), 0);
+  const paidByBillId = new Map<number, number>();
+  const paidByOldBalanceNote = new Map<string, number>();
+
+  for (const payment of customerPayments) {
+    const amount = Number(payment.amount || 0);
+    if (payment.billId) {
+      paidByBillId.set(payment.billId, (paidByBillId.get(payment.billId) ?? 0) + amount);
+    }
+    if (payment.note) {
+      paidByOldBalanceNote.set(payment.note, (paidByOldBalanceNote.get(payment.note) ?? 0) + amount);
+    }
+  }
+
+  const missingStoredPayments = customerBills.reduce((total, bill) => {
+    const storedPaid = Number(bill.billPaidAmount || 0) + Number(bill.oldBalancePaidAmount || 0);
+    if (storedPaid <= 0) return total;
+
+    const persistedPaid =
+      (paidByBillId.get(bill.id) ?? 0) +
+      (paidByOldBalanceNote.get(getOldBalancePaymentNote(bill.id)) ?? 0);
+
+    return total + Math.max(0, storedPaid - persistedPaid);
+  }, 0);
 
   let manualCreditTotal = 0;
   try {
@@ -57,7 +92,7 @@ async function getCustomerOutstandingBalance(tx: AppDb, customerId: number) {
     if (!isMissingLedgerTableError(error)) throw error;
   }
 
-  return Number(billSum?.value || 0) + manualCreditTotal - Number(paymentSum?.value || 0);
+  return totalBilled + manualCreditTotal - (totalPaid + missingStoredPayments);
 }
 
 function getOldBalancePaymentNote(billId: number) {
@@ -131,7 +166,7 @@ async function prepareBillMutation(
         ? Math.max(0, await getCustomerOutstandingBalance(tx, customerId))
         : 0;
   const grandTotal = totalAmount + oldBalanceAmount;
-  const paymentApplied = Math.min(Math.max(data.paidAmount || 0, 0), grandTotal);
+  const paymentApplied = Math.max(data.paidAmount || 0, 0);
   const billPaidAmount = Math.min(paymentApplied, totalAmount);
   const oldBalancePaidAmount = Math.max(paymentApplied - billPaidAmount, 0);
   const billDate = data.date ? parseISTDateTime(data.date) : new Date();
@@ -142,46 +177,21 @@ async function prepareBillMutation(
   for (const item of data.items) {
     let productId = item.productId || null;
     let costPrice = item.costPrice ?? 0;
+    let productCostPrice: number | null = null;
     let primaryUnit = "PCS";
     let secondaryUnit: string | null = null;
     let unitConversion: number | null = null;
 
     if (productId) {
       const [product] = await tx.select().from(products).where(eq(products.id, productId));
-      if (product && costPrice === 0) {
-        costPrice = Number(product.costPrice || 0);
-      }
       if (product) {
+        productCostPrice = Number(product.costPrice || 0);
         primaryUnit = product.primaryUnit || "PCS";
         secondaryUnit = product.secondaryUnit ?? null;
         unitConversion = product.unitConversion ?? null;
       }
     } else {
-      const [existing] = await tx.select().from(products).where(eq(products.name, item.name));
-      if (existing) {
-        productId = existing.id;
-        if (costPrice === 0) {
-          costPrice = Number(existing.costPrice || 0);
-        }
-        primaryUnit = existing.primaryUnit || "PCS";
-        secondaryUnit = existing.secondaryUnit ?? null;
-        unitConversion = existing.unitConversion ?? null;
-      } else {
-        primaryUnit = item.unit || "PCS";
-        const [newProduct] = await tx
-          .insert(products)
-          .values({
-            name: item.name,
-            price: item.price.toString(),
-            costPrice: costPrice.toString(),
-            primaryUnit,
-            secondaryUnit: null,
-            unitConversion: null,
-            stock: 0,
-          })
-          .returning();
-        productId = newProduct.id;
-      }
+      primaryUnit = item.unit || "PCS";
     }
 
     const unitContext = {
@@ -192,6 +202,9 @@ async function prepareBillMutation(
     const selectedUnit = item.unit || getDefaultSalesUnit(unitContext);
     const baseUnit = item.baseUnit || getBaseUnit(unitContext);
     const baseQuantity = item.baseQuantity || toBaseQuantity(item.quantity, unitContext, selectedUnit);
+    if (productCostPrice !== null) {
+      costPrice = deriveUnitPriceFromBase(productCostPrice, unitContext, selectedUnit);
+    }
 
     totalProfit += (item.price - costPrice) * item.quantity;
     billItemsData.push({
@@ -248,10 +261,10 @@ async function applyBillArtifacts(
     if (itemData.productId) {
       const [product] = await tx.select().from(products).where(eq(products.id, itemData.productId));
       if (product) {
-        const currentStock = product.stock || 0;
+        const currentStock = Number(product.stock || 0);
         const newStock = Math.max(0, currentStock - itemData.baseQuantity);
 
-        await tx.update(products).set({ stock: newStock }).where(eq(products.id, itemData.productId));
+        await tx.update(products).set({ stock: newStock.toString() }).where(eq(products.id, itemData.productId));
         await tx.insert(stockAdjustments).values({
           productId: itemData.productId,
           quantity: -itemData.baseQuantity,
@@ -385,7 +398,7 @@ async function reverseBillArtifacts(
 
     await tx
       .update(products)
-      .set({ stock: Number(product.stock || 0) + Number(item.baseQuantity || item.quantity || 0) })
+      .set({ stock: (Number(product.stock || 0) + Number(item.baseQuantity || item.quantity || 0)).toString() })
       .where(eq(products.id, item.productId));
   }
 
@@ -479,21 +492,24 @@ export async function updateBillTransaction(
       throw new Error("Only completed bills can be edited");
     }
 
-    const existingCustomerId = existingBill.customerId ?? undefined;
-    const requestedCustomerId = data.customerId ?? undefined;
-    if (existingCustomerId !== requestedCustomerId) {
-      throw new Error("Changing customer on an existing bill is not allowed");
-    }
-
     await reverseBillArtifacts(tx, billId, existingBill.customerId);
 
-    const payload = await prepareBillMutation(tx, data, {
-      oldBalanceAmount: Number(existingBill.oldBalanceAmount || 0),
-    });
+    const existingCustomerId = existingBill.customerId ?? undefined;
+    const requestedCustomerId = data.customerId ?? undefined;
+    const payload = await prepareBillMutation(
+      tx,
+      data,
+      existingCustomerId === requestedCustomerId
+        ? {
+            oldBalanceAmount: Number(existingBill.oldBalanceAmount || 0),
+          }
+        : undefined,
+    );
 
     const [updatedBill] = await tx
       .update(bills)
       .set({
+        customerId: payload.customerId ?? null,
         subtotalAmount: payload.subtotalAmount.toFixed(2),
         extraChargesTotal: payload.extraChargesTotal.toFixed(2),
         totalAmount: payload.totalAmount.toFixed(2),
@@ -552,7 +568,31 @@ export async function getCustomerStatement(db: AppDb, customerId: number) {
     .where(eq(payments.customerId, customerId));
 
   const totalBilled = customerBills.reduce((sum, bill) => sum + Number(bill.totalAmount || 0), 0);
-  const totalPaid = customerPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  const persistedPaid = customerPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  const paidByBillId = new Map<number, number>();
+  const paidByOldBalanceNote = new Map<string, number>();
+
+  for (const payment of customerPayments) {
+    const amount = Number(payment.amount || 0);
+    if (payment.billId) {
+      paidByBillId.set(payment.billId, (paidByBillId.get(payment.billId) ?? 0) + amount);
+    }
+    if (payment.note) {
+      paidByOldBalanceNote.set(payment.note, (paidByOldBalanceNote.get(payment.note) ?? 0) + amount);
+    }
+  }
+
+  const missingStoredPayments = customerBills.reduce((sum, bill) => {
+    const storedPaid = Number(bill.billPaidAmount || 0) + Number(bill.oldBalancePaidAmount || 0);
+    if (storedPaid <= 0) return sum;
+
+    const billPersistedPaid =
+      (paidByBillId.get(bill.id) ?? 0) +
+      (paidByOldBalanceNote.get(getOldBalancePaymentNote(bill.id)) ?? 0);
+
+    return sum + Math.max(0, storedPaid - billPersistedPaid);
+  }, 0);
+  const totalPaid = persistedPaid + missingStoredPayments;
 
   return {
     customer,

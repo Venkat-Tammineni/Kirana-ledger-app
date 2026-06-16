@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useRoute } from "wouter";
 import { ArrowLeft, CalendarIcon, CreditCard, IndianRupee, Plus, Save, Search, ShoppingBag, Trash2 } from "lucide-react";
-import { useBill, useCreateProduct, useProducts, useUpdateBill } from "@/hooks/use-pos";
+import { useBill, useCreateProduct, useCustomers, useProducts, useUpdateBill } from "@/hooks/use-pos";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -11,8 +11,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { formatCurrencyINR, formatDate, formatDateTime, toISTDateTimeStringForApi } from "@/lib/format";
+import { formatBillLabel } from "@shared/billing";
 import {
   deriveUnitPriceFromBase,
+  getAvailableUnits,
   getBaseUnit,
   getDefaultSalesUnit,
   getPrimaryUnit,
@@ -45,6 +47,11 @@ interface ExtraChargeRow {
 }
 
 const ROUND_OFF_LABEL = "Round Off";
+const DEFAULT_CUSTOM_UNIT: UnitOption = "KG";
+
+function createEmptyCustomItem() {
+  return { name: "", price: "", costPrice: "", quantity: "1", unit: DEFAULT_CUSTOM_UNIT };
+}
 
 interface PendingProductSelection {
   productId: number;
@@ -110,7 +117,11 @@ export default function BillEdit() {
   const [, params] = useRoute("/bills/:id/edit");
   const billId = Number(params?.id);
   const [, setLocation] = useLocation();
+  const searchParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const backHref = searchParams?.get("back") || "/bills";
+  const backQuery = `back=${encodeURIComponent(backHref)}`;
   const { data: bill, isLoading } = useBill(billId);
+  const { data: customers, isLoading: isCustomersLoading } = useCustomers();
   const { data: products, isLoading: isProductsLoading } = useProducts();
   const { mutate: createProduct, isPending: isCreatingProduct } = useCreateProduct();
   const { mutate: updateBill, isPending: isSaving } = useUpdateBill();
@@ -121,15 +132,18 @@ export default function BillEdit() {
   const [extraCharges, setExtraCharges] = useState<ExtraChargeRow[]>([]);
   const [pendingProduct, setPendingProduct] = useState<PendingProductSelection | null>(null);
   const [isCustomItemOpen, setIsCustomItemOpen] = useState(false);
-  const [customItem, setCustomItem] = useState({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS" as UnitOption, addToProducts: false });
+  const [customItem, setCustomItem] = useState(createEmptyCustomItem);
+  const [addCustomItemToProducts, setAddCustomItemToProducts] = useState(false);
   const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [paidAmount, setPaidAmount] = useState("");
   const [billDate, setBillDate] = useState<Date | undefined>(new Date());
+  const [isBillDatePickerOpen, setIsBillDatePickerOpen] = useState(false);
   const [editedBy, setEditedBy] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
   const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
-    if (isLoading || isProductsLoading || initialized) return;
+    if (isLoading || isProductsLoading || isCustomersLoading || initialized) return;
     if (!bill) {
       setInitialized(true);
       return;
@@ -170,14 +184,20 @@ export default function BillEdit() {
     );
     setBillDate(bill.date ? new Date(bill.date) : new Date());
     setEditedBy(bill.lastEditedBy || "");
+    setSelectedCustomerId(bill.customerId ?? null);
     setInitialized(true);
-  }, [bill, initialized, isLoading, isProductsLoading, products]);
+  }, [bill, initialized, isCustomersLoading, isLoading, isProductsLoading, products]);
 
   const filteredProducts = useMemo(() => {
     if (!products || !searchTerm) return products || [];
     const lower = searchTerm.toLowerCase();
     return products.filter((product) => product.name.toLowerCase().includes(lower));
   }, [products, searchTerm]);
+
+  const selectedCustomer = useMemo(
+    () => customers?.find((customer) => customer.id === selectedCustomerId) ?? null,
+    [customers, selectedCustomerId],
+  );
 
   const openProductPriceDialog = (product: any) => {
     const unitConfig = {
@@ -337,11 +357,12 @@ export default function BillEdit() {
         },
       ]);
 
-      setCustomItem({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS", addToProducts: false });
+      setCustomItem(createEmptyCustomItem());
+      setAddCustomItemToProducts(false);
       setIsCustomItemOpen(false);
     };
 
-    if (customItem.addToProducts) {
+    if (addCustomItemToProducts) {
       createProduct(
         {
           name: trimmedName,
@@ -467,7 +488,12 @@ export default function BillEdit() {
   const baseBillTotal = cartTotal + baseExtraChargesTotal;
   const extraChargesTotal = normalizedExtraCharges.reduce((sum, charge) => sum + charge.amountNumber, 0);
   const billTotal = cartTotal + extraChargesTotal;
-  const oldBalance = Math.max(0, Number(bill?.oldBalanceAmount || 0));
+  const oldBalance =
+    selectedCustomerId == null
+      ? 0
+      : bill?.customerId === selectedCustomerId
+        ? Math.max(0, Number(bill?.oldBalanceAmount || 0))
+        : Math.max(0, Number(selectedCustomer?.balance || 0));
   const baseGrandTotal = baseBillTotal + oldBalance;
   const grandTotal = billTotal + oldBalance;
 
@@ -529,8 +555,9 @@ export default function BillEdit() {
     updateBill(
       {
         id: bill.id,
+        previousCustomerId: bill.customerId ?? undefined,
         bill: {
-          customerId: bill.customerId ?? undefined,
+          customerId: selectedCustomerId ?? undefined,
           items: cart.map((item) => ({
             productId: item.productId,
             name: item.name.trim(),
@@ -554,14 +581,14 @@ export default function BillEdit() {
             amount: charge.amountNumber,
           })),
           editedBy: editedBy.trim() || undefined,
-          paidAmount: Math.min(payment, grandTotal),
+          paidAmount: payment,
           date: billDate ? toISTDateTimeStringForApi(billDate) : undefined,
         },
       },
       {
         onSuccess: () => {
           toast({ title: "Bill updated", description: "Changes saved successfully." });
-          setLocation(`/bills/${bill.id}`);
+          setLocation(`/bills/${bill.id}?${backQuery}`);
         },
         onError: (error: Error) => {
           toast({ title: "Update failed", description: error.message, variant: "destructive" });
@@ -570,7 +597,7 @@ export default function BillEdit() {
     );
   };
 
-  if (isLoading || isProductsLoading || !initialized) {
+  if (isLoading || isProductsLoading || isCustomersLoading || !initialized) {
     return (
       <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
         <Skeleton className="h-8 w-56" />
@@ -593,19 +620,36 @@ export default function BillEdit() {
         <div className="p-4 border-b border-border bg-card">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
-              <Link href={`/bills/${bill.id}`} className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
+              <Link href={`/bills/${bill.id}?${backQuery}`} className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
                 <ArrowLeft className="w-4 h-4" />
                 Back to Bill Details
               </Link>
-              <h2 className="font-display font-bold text-xl mt-2">Edit Bill #{bill.id}</h2>
+              <h2 className="font-display font-bold text-xl mt-2">Edit Bill {formatBillLabel(bill)}</h2>
             </div>
-            <div className="text-sm text-muted-foreground">
-              Customer: <span className="font-medium text-foreground">{bill.customer?.name || "Walk-in Customer"}</span>
+            <div className="w-full max-w-sm space-y-1">
+              <label className="text-sm text-muted-foreground">Customer</label>
+              <select
+                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+                value={selectedCustomerId ?? ""}
+                onChange={(e) => setSelectedCustomerId(e.target.value ? Number(e.target.value) : null)}
+              >
+                <option value="">Walk-in Customer</option>
+                {customers?.map((customer) => (
+                  <option key={customer.id} value={customer.id}>
+                    {customer.name} {customer.phone ? `(${customer.phone})` : ""}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
-          {bill.customer?.phone && (
+          {selectedCustomer?.phone && (
             <div className="mt-2 text-xs text-muted-foreground">
-              Phone: {bill.customer.phone}
+              Phone: {selectedCustomer.phone}
+            </div>
+          )}
+          {selectedCustomerId != null && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Current due for this customer: {formatCurrencyINR(oldBalance)}
             </div>
           )}
           {bill.lastEditedAt && (
@@ -642,7 +686,7 @@ export default function BillEdit() {
                     <Input
                       type="number"
                       min="0"
-                      step="0.01"
+                      step="1"
                       value={item.price}
                       onChange={(e) => setSellingPrice(item.tempId, Number(e.target.value) || 0)}
                       className="h-8 w-28 font-mono"
@@ -683,7 +727,11 @@ export default function BillEdit() {
                       value={item.unit}
                       onChange={(e) => setUnit(item.tempId, e.target.value as UnitOption)}
                     >
-                      {Array.from(new Set([item.primaryUnit, ...(item.secondaryUnit ? [item.secondaryUnit] : [])])).map((unit) => (
+                      {getAvailableUnits({
+                        primaryUnit: item.primaryUnit,
+                        secondaryUnit: item.secondaryUnit,
+                        unitConversion: item.unitConversion,
+                      }).map((unit) => (
                         <option key={unit} value={unit}>
                           {unit}
                         </option>
@@ -767,7 +815,13 @@ export default function BillEdit() {
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <Dialog open={isCustomItemOpen} onOpenChange={setIsCustomItemOpen}>
+            <Dialog
+              open={isCustomItemOpen}
+              onOpenChange={(open) => {
+                setIsCustomItemOpen(open);
+                setAddCustomItemToProducts(false);
+              }}
+            >
               <DialogTrigger asChild>
                 <Button variant="outline" className="h-12 text-base">
                   <Plus className="w-4 h-4 mr-2" /> Custom Item
@@ -825,8 +879,8 @@ export default function BillEdit() {
                     <label className="flex items-center gap-2 text-sm">
                       <input
                         type="checkbox"
-                        checked={customItem.addToProducts}
-                        onChange={(e) => setCustomItem({ ...customItem, addToProducts: e.target.checked })}
+                        checked={addCustomItemToProducts}
+                        onChange={(e) => setAddCustomItemToProducts(e.target.checked)}
                       />
                       Add this custom item to products also
                     </label>
@@ -920,7 +974,7 @@ export default function BillEdit() {
                   <Input
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     value={pendingProduct.price}
                     onChange={(e) =>
                       setPendingProduct((current) =>
@@ -964,6 +1018,10 @@ export default function BillEdit() {
                 <div className="text-4xl font-display font-bold text-foreground mt-1">{formatCurrencyINR(grandTotal)}</div>
                 <div className="mt-3 space-y-1 text-left text-sm">
                   <div className="flex justify-between text-muted-foreground">
+                    <span>Customer</span>
+                    <span>{selectedCustomer?.name || "Walk-in Customer"}</span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
                     <span>This Bill Total</span>
                     <span className="font-mono">{formatCurrencyINR(cartTotal)}</span>
                   </div>
@@ -981,22 +1039,28 @@ export default function BillEdit() {
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-medium">Paid Amount</label>
+                <label className="text-sm font-medium">Amount Received</label>
                 <div className="relative">
                   <IndianRupee className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
                   <Input
                     type="number"
+                    step="0.01"
+                    min="0"
                     className="pl-10 h-12 text-lg font-mono"
                     value={paidAmount}
+                    placeholder="0 if not received"
                     onChange={(e) => setPaidAmount(e.target.value)}
                     onFocus={(e) => e.target.select()}
                   />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Set this to 0 if no money was received for this bill.
+                </p>
               </div>
 
               <div className="space-y-2">
                 <label className="text-sm font-medium">Bill Date</label>
-                <Popover>
+                <Popover open={isBillDatePickerOpen} onOpenChange={setIsBillDatePickerOpen}>
                   <PopoverTrigger asChild>
                     <Button
                       type="button"
@@ -1014,7 +1078,11 @@ export default function BillEdit() {
                     <Calendar
                       mode="single"
                       selected={billDate}
-                      onSelect={setBillDate}
+                      onSelect={(date) => {
+                        if (!date) return;
+                        setBillDate(date);
+                        setIsBillDatePickerOpen(false);
+                      }}
                       initialFocus
                     />
                   </PopoverContent>

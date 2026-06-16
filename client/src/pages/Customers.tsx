@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useCustomers, useCreateCustomer, useUpdateCustomer, useDeleteCustomer } from "@/hooks/use-pos";
 import { Link, useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
@@ -13,10 +13,20 @@ import { useToast } from "@/hooks/use-toast";
 import { formatCurrencyINR } from "@/lib/format";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
 
+const CUSTOMER_SCROLL_RESTORE_KEY = "kirana:customers:scrollRestore";
+const CUSTOMER_LAST_SCROLL_KEY = "kirana:customers:lastScroll";
+
 export default function Customers() {
   const [, setLocation] = useLocation();
-  const [search, setSearch] = useState("");
-  const [showPendingOnly, setShowPendingOnly] = useState(false);
+  const hasRestoredScrollRef = useRef(false);
+  const searchParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const initialSearch = searchParams?.get("search") ?? "";
+  const initialShowPendingOnly = searchParams?.get("pending") === "1";
+  const returnToCustomerId = searchParams?.get("returnTo");
+  const returnScroll = searchParams?.get("returnScroll");
+
+  const [search, setSearch] = useState(initialSearch);
+  const [showPendingOnly, setShowPendingOnly] = useState(initialShowPendingOnly);
   const { data: customers, isLoading } = useCustomers(search);
   const { mutate: createCustomer, isPending } = useCreateCustomer();
   const { mutate: updateCustomer, isPending: isUpdating } = useUpdateCustomer();
@@ -45,6 +55,239 @@ export default function Customers() {
     0,
   );
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const nextParams = new URLSearchParams(window.location.search);
+    if (search) {
+      nextParams.set("search", search);
+    } else {
+      nextParams.delete("search");
+    }
+
+    if (showPendingOnly) {
+      nextParams.set("pending", "1");
+    } else {
+      nextParams.delete("pending");
+    }
+
+    const nextSearch = nextParams.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [search, showPendingOnly]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const saveLastScroll = () => {
+      window.sessionStorage.setItem(
+        CUSTOMER_LAST_SCROLL_KEY,
+        JSON.stringify({
+          scrollTop: Math.max(0, Math.round(window.scrollY)),
+          search,
+          pending: showPendingOnly,
+        }),
+      );
+    };
+
+    window.addEventListener("scroll", saveLastScroll, { passive: true });
+    return () => window.removeEventListener("scroll", saveLastScroll);
+  }, [search, showPendingOnly]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || isLoading) return;
+
+    const highlightCustomer = (customerElement: HTMLElement | null) => {
+      customerElement?.classList.add("ring-2", "ring-primary", "ring-offset-2");
+      window.setTimeout(() => {
+        customerElement?.classList.remove("ring-2", "ring-primary", "ring-offset-2");
+      }, 1800);
+    };
+
+    const scrollToCustomer = (customerId?: string | null) => {
+      if (!customerId) return false;
+
+      const customerElement = document.querySelector<HTMLElement>(`[data-customer-id="${customerId}"]`);
+      if (!customerElement) return false;
+
+      customerElement.scrollIntoView({ behavior: "auto", block: "center" });
+      highlightCustomer(customerElement);
+      return true;
+    };
+
+    const restoreCustomerWhenReady = (customerId?: string | null) => {
+      if (!customerId) return;
+
+      const tryRestore = () => {
+        scrollToCustomer(customerId);
+      };
+
+      tryRestore();
+      window.requestAnimationFrame(tryRestore);
+      [80, 180, 350, 700, 1200].forEach((delay) => window.setTimeout(tryRestore, delay));
+    };
+
+    const restoreScroll = (scrollTop: number, customerId?: string | null) => {
+      const shouldUseCustomerAnchor = Boolean(customerId) && scrollTop <= 8;
+      const applyScroll = () => {
+        if (shouldUseCustomerAnchor) {
+          restoreCustomerWhenReady(customerId);
+          return;
+        }
+        window.scrollTo({ top: scrollTop, left: 0, behavior: "auto" });
+      };
+
+      applyScroll();
+      window.requestAnimationFrame(() => {
+        applyScroll();
+        if (!customerId) return;
+
+        const customerElement = document.querySelector<HTMLElement>(`[data-customer-id="${customerId}"]`);
+        highlightCustomer(customerElement);
+      });
+      [80, 180, 350].forEach((delay) => window.setTimeout(applyScroll, delay));
+    };
+
+    const clearReturnParams = () => {
+      const nextParams = new URLSearchParams(window.location.search);
+      nextParams.delete("returnScroll");
+      nextParams.delete("returnTo");
+      const nextSearch = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`;
+      window.history.replaceState(window.history.state, "", nextUrl);
+    };
+
+    const scrollTop = Number(returnScroll);
+    if (Number.isFinite(scrollTop) && scrollTop >= 0) {
+      restoreScroll(scrollTop, returnToCustomerId);
+      hasRestoredScrollRef.current = true;
+      clearReturnParams();
+      return;
+    }
+
+    const storedRestore = window.sessionStorage.getItem(CUSTOMER_SCROLL_RESTORE_KEY);
+    if (storedRestore) {
+      try {
+        const parsed = JSON.parse(storedRestore) as {
+          scrollTop?: number;
+          customerId?: number;
+          search?: string;
+          pending?: boolean;
+        };
+        const storedScrollTop = Number(parsed.scrollTop);
+        const matchesCurrentView =
+          (parsed.search ?? "") === search &&
+          Boolean(parsed.pending) === showPendingOnly;
+
+      if (Number.isFinite(storedScrollTop) && storedScrollTop >= 0 && matchesCurrentView) {
+          restoreScroll(storedScrollTop, parsed.customerId ? String(parsed.customerId) : null);
+          if (parsed.customerId) {
+            restoreCustomerWhenReady(String(parsed.customerId));
+          }
+          hasRestoredScrollRef.current = true;
+          return;
+        }
+      } catch {
+        // Ignore invalid restore data.
+      }
+    }
+
+    const storedLastScroll = window.sessionStorage.getItem(CUSTOMER_LAST_SCROLL_KEY);
+    if (!hasRestoredScrollRef.current && storedLastScroll) {
+      try {
+        const parsed = JSON.parse(storedLastScroll) as {
+          scrollTop?: number;
+          search?: string;
+          pending?: boolean;
+        };
+        const storedScrollTop = Number(parsed.scrollTop);
+        const matchesCurrentView =
+          (parsed.search ?? "") === search &&
+          Boolean(parsed.pending) === showPendingOnly;
+
+      if (Number.isFinite(storedScrollTop) && storedScrollTop > 0 && matchesCurrentView) {
+          restoreScroll(storedScrollTop);
+          hasRestoredScrollRef.current = true;
+          return;
+        }
+      } catch {
+        // Ignore invalid restore data.
+      }
+    }
+
+    if (!returnToCustomerId) return;
+
+    const restoreToCustomer = () => {
+      if (!scrollToCustomer(returnToCustomerId)) return false;
+
+      const nextParams = new URLSearchParams(window.location.search);
+      nextParams.delete("returnScroll");
+      nextParams.delete("returnTo");
+      const nextSearch = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`;
+      window.history.replaceState(window.history.state, "", nextUrl);
+
+      return true;
+    };
+
+    restoreCustomerWhenReady(returnToCustomerId);
+    if (restoreToCustomer()) return;
+
+    const timeoutIds = [150, 350, 700, 1200].map((delay) => window.setTimeout(restoreToCustomer, delay));
+    return () => timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+  }, [isLoading, returnScroll, returnToCustomerId, search, showPendingOnly, visibleCustomers]);
+
+  const buildCustomerHref = (customerId: number, scrollTop = 0) => {
+    const backParams = new URLSearchParams();
+    backParams.set("returnTo", String(customerId));
+    backParams.set("returnScroll", String(Math.max(0, Math.round(scrollTop))));
+    if (search) backParams.set("search", search);
+    if (showPendingOnly) backParams.set("pending", "1");
+
+    return `/customers/${customerId}?back=${encodeURIComponent(`/customers?${backParams.toString()}`)}`;
+  };
+
+  const saveCustomerListPosition = (customerId?: number) => {
+    const currentScroll = typeof window !== "undefined" ? window.scrollY : 0;
+    if (typeof window !== "undefined") {
+      const restorePayload = JSON.stringify({
+        customerId,
+        scrollTop: Math.max(0, Math.round(currentScroll)),
+        search,
+        pending: showPendingOnly,
+      });
+      window.sessionStorage.setItem(CUSTOMER_SCROLL_RESTORE_KEY, restorePayload);
+      window.sessionStorage.setItem(CUSTOMER_LAST_SCROLL_KEY, restorePayload);
+    }
+    return currentScroll;
+  };
+
+  const openCustomer = (customerId: number) => {
+    const currentScroll = saveCustomerListPosition(customerId);
+    if (typeof window !== "undefined") {
+      const returnParams = new URLSearchParams(window.location.search);
+      returnParams.set("returnTo", String(customerId));
+      returnParams.set("returnScroll", String(Math.max(0, Math.round(currentScroll))));
+      if (search) {
+        returnParams.set("search", search);
+      } else {
+        returnParams.delete("search");
+      }
+      if (showPendingOnly) {
+        returnParams.set("pending", "1");
+      } else {
+        returnParams.delete("pending");
+      }
+      const nextSearch = returnParams.toString();
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`,
+      );
+    }
+    setLocation(buildCustomerHref(customerId, currentScroll));
+  };
+
   const handleCreate = () => {
     const parsed = customerFormSchema.safeParse(newCustomer);
     if (!parsed.success) {
@@ -61,6 +304,7 @@ export default function Customers() {
 
   const handleEditSave = () => {
     if (!editingCustomer) return;
+    saveCustomerListPosition(editingCustomer.id);
     const parsed = customerFormSchema.safeParse({
       name: editingCustomer.name,
       phone: editingCustomer.phone,
@@ -95,7 +339,7 @@ export default function Customers() {
           customer.name.toLowerCase().includes(match[1].trim()),
         );
         if (matches.length !== 1) return `I could not uniquely match ${match[1].trim()}. Please search once manually.`;
-        setLocation(`/customers/${matches[0].id}`);
+        openCustomer(matches[0].id);
         return `Opening ${matches[0].name}.`;
       },
     },
@@ -216,8 +460,13 @@ export default function Customers() {
             {pendingCustomers.map((customer) => (
               <Link
                 key={`pending-${customer.id}`}
-                href={`/customers/${customer.id}`}
+                data-customer-id={customer.id}
+                href={buildCustomerHref(customer.id)}
                 className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-4 py-3 hover:bg-muted/50 transition-colors"
+                onClick={(event) => {
+                  event.preventDefault();
+                  openCustomer(customer.id);
+                }}
               >
                 <div>
                   <div className="font-medium">{customer.name}</div>
@@ -247,11 +496,16 @@ export default function Customers() {
           {visibleCustomers?.map((customer) => (
             <div
               key={customer.id}
+              data-customer-id={customer.id}
               className="bg-card p-4 rounded-xl border border-border hover:border-primary hover:shadow-md transition-all group flex justify-between items-center"
             >
               <Link
-                href={`/customers/${customer.id}`}
+                href={buildCustomerHref(customer.id)}
                 className="flex-1 flex items-center gap-4 cursor-pointer"
+                onClick={(event) => {
+                  event.preventDefault();
+                  openCustomer(customer.id);
+                }}
               >
                 <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold">
                   {customer.name.charAt(0).toUpperCase()}
@@ -305,6 +559,7 @@ export default function Customers() {
                   type="button"
                   className="p-2 rounded-full hover:bg-muted text-muted-foreground"
                   onClick={() => {
+                    saveCustomerListPosition(customer.id);
                     setEditingCustomer({
                       id: customer.id,
                       name: customer.name,
@@ -325,6 +580,7 @@ export default function Customers() {
                         "Are you sure you want to delete this customer? This cannot be undone.",
                       )
                     ) {
+                      saveCustomerListPosition(customer.id);
                       deleteCustomer(customer.id);
                     }
                   }}

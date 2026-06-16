@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { useAccounts, useCustomer, useRepayCustomer, useAddCustomerCredit, useDeleteCustomerCredit, useDeleteCustomerPayment, useUpdateCustomerDailyProfit, useUpdateCustomerProfit } from "@/hooks/use-pos";
-import { useRoute, Link } from "wouter";
+import { useRoute, Link, useLocation } from "wouter";
 import { MetricCard } from "@/components/MetricCard";
 import {
   ArrowLeft,
@@ -43,13 +43,30 @@ import { VoiceAssistant } from "@/components/VoiceAssistant";
 import { parseSpokenAmount, parseVoiceDateInput } from "@/lib/voice-commands";
 
 type EntryMode = "CREDIT" | "PAYMENT" | null;
+type ProfitViewMode = "day" | "custom";
+const CUSTOMER_SCROLL_RESTORE_KEY = "kirana:customers:scrollRestore";
+const CUSTOMER_LAST_SCROLL_KEY = "kirana:customers:lastScroll";
 
 export default function CustomerDetails() {
   const [, params] = useRoute("/customers/:id");
+  const [, setLocation] = useLocation();
   const id = Number(params?.id);
+  const searchParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const backHref = searchParams?.get("back") || "/customers";
+  const returnScroll = searchParams?.get("returnScroll");
   const [selectedProfitDate, setSelectedProfitDate] = useState<Date>(new Date());
+  const [profitViewMode, setProfitViewMode] = useState<ProfitViewMode>("day");
+  const [customProfitStartDate, setCustomProfitStartDate] = useState<Date | undefined>(new Date());
+  const [customProfitEndDate, setCustomProfitEndDate] = useState<Date | undefined>(new Date());
   const selectedProfitDateKey = toDateInputString(selectedProfitDate);
-  const { data: customer, isLoading } = useCustomer(id, selectedProfitDateKey);
+  const customProfitStartDateKey = customProfitStartDate ? toDateInputString(customProfitStartDate) : undefined;
+  const customProfitEndDateKey = customProfitEndDate ? toDateInputString(customProfitEndDate) : undefined;
+  const { data: customer, isLoading } = useCustomer(
+    id,
+    profitViewMode === "custom"
+      ? { startDate: customProfitStartDateKey, endDate: customProfitEndDateKey }
+      : { profitDate: selectedProfitDateKey },
+  );
   const { data: accounts } = useAccounts();
   const { mutate: repayCustomer, isPending: isRepaying } = useRepayCustomer();
   const { mutate: addCustomerCredit, isPending: isAddingCredit } = useAddCustomerCredit();
@@ -58,6 +75,59 @@ export default function CustomerDetails() {
   const { mutate: updateCustomerProfit, isPending: isUpdatingProfit } = useUpdateCustomerProfit();
   const { mutate: updateCustomerDailyProfit, isPending: isUpdatingDailyProfit } = useUpdateCustomerDailyProfit();
   const { toast } = useToast();
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const scrollTop = Number(returnScroll);
+    if (Number.isFinite(scrollTop) && scrollTop >= 0) {
+      window.scrollTo({ top: scrollTop, left: 0, behavior: "auto" });
+
+      const nextParams = new URLSearchParams(window.location.search);
+      nextParams.delete("returnScroll");
+      const nextSearch = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`;
+      window.history.replaceState(window.history.state, "", nextUrl);
+      return;
+    }
+
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [id, returnScroll]);
+
+  const openBillFromLedger = (billId: number) => {
+    if (typeof window === "undefined") return;
+
+    const nextParams = new URLSearchParams(window.location.search);
+    nextParams.set("returnScroll", String(window.scrollY));
+    const nextSearch = nextParams.toString();
+    const backTarget = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`;
+
+    setLocation(`/bills/${billId}?back=${encodeURIComponent(backTarget)}`);
+  };
+
+  const handleBackToCustomers = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (typeof window === "undefined") return;
+
+    event.preventDefault();
+
+    try {
+      const backUrl = new URL(backHref, window.location.origin);
+      if (backUrl.pathname === "/customers") {
+        const restorePayload = JSON.stringify({
+          customerId: backUrl.searchParams.get("returnTo"),
+          scrollTop: Math.max(0, Math.round(Number(backUrl.searchParams.get("returnScroll")) || 0)),
+          search: backUrl.searchParams.get("search") ?? "",
+          pending: backUrl.searchParams.get("pending") === "1",
+        });
+        window.sessionStorage.setItem(CUSTOMER_SCROLL_RESTORE_KEY, restorePayload);
+        window.sessionStorage.setItem(CUSTOMER_LAST_SCROLL_KEY, restorePayload);
+      }
+    } catch {
+      // Fall back to normal navigation if the saved back link is not a URL path.
+    }
+
+    setLocation(backHref);
+  };
 
   const [entryMode, setEntryMode] = useState<EntryMode>(null);
   const [entryAmount, setEntryAmount] = useState("");
@@ -399,12 +469,41 @@ export default function CustomerDetails() {
   if (!customer) return <div>Customer not found</div>;
 
   const balance = Number(customer.balance || 0);
+  const receivedEntries = customer.ledger.filter((entry) => entry.type === "PAYMENT");
+  const getEntryLabel = (entry: (typeof customer.ledger)[number]) => {
+    if (entry.type === "PAYMENT") {
+      return `${formatDate(entry.createdAt, "dd MMM yyyy")} - ${formatCurrencyINR(Number(entry.amount || 0))} received`;
+    }
+    if (entry.billId) return `Bill #${entry.billId}`;
+    return "Credit given";
+  };
+  const getEntryNote = (entry: (typeof customer.ledger)[number]) => {
+    if (entry.type === "PAYMENT") {
+      if (entry.billId) return `${formatDate(entry.createdAt, "dd MMM yyyy")} payment received during Bill #${entry.billId}`;
+      return entry.note || "Payment received";
+    }
+
+    if (entry.billId) return "Bill amount added to total";
+    return entry.note || "Manual credit added";
+  };
+  const profitCardTitle =
+    profitViewMode === "custom"
+      ? `Profit: ${formatDate(customProfitStartDate || new Date(), "dd MMM")} to ${formatDate(customProfitEndDate || new Date(), "dd MMM")}`
+      : `Profit for ${formatDate(selectedProfitDate, "dd MMM")}`;
+  const profitCardSubValue =
+    profitViewMode === "custom"
+      ? "Custom date range profit"
+      : "Change the date above to view another day";
 
   return (
     <>
-    <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-8 pb-24 md:pb-8">
+    <div className="mx-auto w-full max-w-7xl space-y-8 p-6 pb-24 md:p-8 md:pb-8">
       <div className="flex flex-col gap-4">
-        <Link href="/customers" className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors">
+        <Link
+          href={backHref}
+          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          onClick={handleBackToCustomers}
+        >
           <ArrowLeft className="w-4 h-4 mr-1" /> Back to Customers
         </Link>
 
@@ -434,58 +533,103 @@ export default function CustomerDetails() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full lg:w-auto">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full lg:w-auto lg:shrink-0">
             <Button
-              className="h-12 text-base bg-red-600 hover:bg-red-700 text-white"
+              className="h-12 rounded-md text-base bg-red-600 hover:bg-red-700 text-white lg:w-[168px]"
               onClick={() => openEntryDialog("CREDIT")}
             >
               Add Credit
             </Button>
             <Button
-              className="h-12 text-base bg-green-600 hover:bg-green-700 text-white"
+              className="h-12 rounded-md text-base bg-green-600 hover:bg-green-700 text-white lg:w-[168px]"
               onClick={() => openEntryDialog("PAYMENT")}
             >
               Add Payment
             </Button>
             <Button
               variant="outline"
-              className="h-12 text-base"
+              className="h-12 rounded-md text-base whitespace-nowrap lg:w-[168px]"
               onClick={handleShare}
             >
-              <MessageCircle className="w-4 h-4 mr-2" />
+              <MessageCircle className="w-4 h-4 mr-2 shrink-0" />
               Share via WhatsApp
             </Button>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-6">
-        <div className="md:col-span-2 xl:col-span-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 rounded-2xl border border-border bg-card p-4">
-          <div>
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-5">
+        <div className="flex flex-col gap-4 rounded-2xl border border-border bg-card p-4 md:col-span-2 xl:col-span-5 xl:flex-row xl:items-start xl:justify-start">
+          <div className="xl:w-[500px] xl:flex-none xl:pt-2">
             <h3 className="font-semibold">Customer Profit Controls</h3>
-            <p className="text-sm text-muted-foreground">Pick any date to see that day's profit, or manually adjust this customer's overall total profit.</p>
+            <p className="text-sm text-muted-foreground">Pick a single date or custom range to see this customer's profit, or manually adjust the overall total profit.</p>
           </div>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button variant="outline" className="justify-start text-left font-normal min-w-[220px]">
-                  <CalendarIcon className="mr-2 h-4 w-4" />
-                  Profit Date: {formatDate(selectedProfitDate, "dd MMM yyyy")}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto p-0">
-                <Calendar
-                  mode="single"
-                  selected={selectedProfitDate}
-                  onSelect={(date) => date && setSelectedProfitDate(date)}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-            <Button variant="outline" onClick={openDailyProfitDialog}>
+          <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[126px_minmax(220px,1fr)_minmax(140px,174px)_minmax(150px,184px)]">
+            <div className="flex flex-col gap-2 sm:w-[126px] sm:flex-none">
+              <Button className="h-9 w-full" variant={profitViewMode === "day" ? "default" : "outline"} onClick={() => setProfitViewMode("day")}>
+                Day
+              </Button>
+              <Button className="h-9 w-full" variant={profitViewMode === "custom" ? "default" : "outline"} onClick={() => setProfitViewMode("custom")}>
+                Custom Range
+              </Button>
+            </div>
+            {profitViewMode === "custom" ? (
+              <>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="h-20 w-full justify-start whitespace-normal text-left font-normal">
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      From: {formatDate(customProfitStartDate || new Date(), "dd MMM yyyy")}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0">
+                    <Calendar
+                      mode="single"
+                      selected={customProfitStartDate}
+                      onSelect={(date) => date && setCustomProfitStartDate(date)}
+                      initialFocus
+                    />
+                  </PopoverContent>
+                </Popover>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="h-20 w-full justify-start whitespace-normal text-left font-normal">
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      To: {formatDate(customProfitEndDate || new Date(), "dd MMM yyyy")}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0">
+                    <Calendar
+                      mode="single"
+                      selected={customProfitEndDate}
+                      onSelect={(date) => date && setCustomProfitEndDate(date)}
+                      initialFocus
+                    />
+                  </PopoverContent>
+                </Popover>
+              </>
+            ) : (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="h-20 w-full justify-start whitespace-normal text-left font-normal">
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    Profit Date: {formatDate(selectedProfitDate, "dd MMM yyyy")}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0">
+                  <Calendar
+                    mode="single"
+                    selected={selectedProfitDate}
+                    onSelect={(date) => date && setSelectedProfitDate(date)}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
+            )}
+            <Button className="h-20 w-full whitespace-normal" variant="outline" onClick={openDailyProfitDialog} disabled={profitViewMode === "custom"}>
               Edit Day Profit
             </Button>
-            <Button variant="outline" onClick={openProfitDialog}>
+            <Button className="h-20 w-full whitespace-normal" variant="outline" onClick={openProfitDialog}>
               Edit Total Profit
             </Button>
           </div>
@@ -511,10 +655,11 @@ export default function CustomerDetails() {
           className="border-t-4 border-t-green-500"
         />
         <MetricCard
-          title={`Profit for ${formatDate(selectedProfitDate, "dd MMM")}`}
+          title={profitCardTitle}
           value={formatCurrencyINR(Number(customer.todayProfit || 0))}
           icon={<CalendarIcon className="w-6 h-6" />}
-          subValue="Change the date above to view another day"
+          subValue={profitCardSubValue}
+          titleClassName={profitViewMode === "custom" ? "text-xs leading-tight" : undefined}
           className="border-t-4 border-t-amber-500"
         />
         <MetricCard
@@ -537,10 +682,58 @@ export default function CustomerDetails() {
       </div>
 
       <div className="space-y-4">
+        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-2">
+          <div>
+            <h3 className="font-bold text-xl font-display">Money Received</h3>
+            <p className="text-sm text-muted-foreground">Every payment is shown clearly by date and amount.</p>
+          </div>
+          <div className="text-sm font-mono font-semibold text-green-600">
+            Total received {formatCurrencyINR(Number(customer.totalReceived || 0))}
+          </div>
+        </div>
+
+        <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden">
+          {receivedEntries.length > 0 ? (
+            <div className="divide-y divide-border">
+              {receivedEntries.map((entry) => (
+                <div key={`${entry.id}-${entry.createdAt}`} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-5 py-4">
+                  <div>
+                    <div className="font-semibold text-green-700">
+                      {formatDate(entry.createdAt, "dd MMM yyyy")} - {formatCurrencyINR(Number(entry.amount || 0))} received
+                    </div>
+                    <div className="text-sm text-muted-foreground mt-1">
+                      {entry.billId ? `Received during Bill #${entry.billId}` : entry.note || "Manual payment"}
+                    </div>
+                  </div>
+                  <div className="text-left sm:text-right">
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">Balance after</div>
+                    <div
+                      className={cn(
+                        "font-mono font-bold",
+                        Number(entry.runningBalance) > 0 ? "text-red-600" : Number(entry.runningBalance) < 0 ? "text-green-600" : "text-foreground",
+                      )}
+                    >
+                      {Number(entry.runningBalance) < 0
+                        ? `Advance ${formatCurrencyINR(Math.abs(Number(entry.runningBalance || 0)))}`
+                        : formatCurrencyINR(Number(entry.runningBalance || 0))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="px-5 py-8 text-center text-muted-foreground">
+              No payments received yet.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="font-bold text-xl font-display">Customer Ledger</h3>
-            <p className="text-sm text-muted-foreground">Newest entries first with running balance after each transaction.</p>
+            <p className="text-sm text-muted-foreground">Bills add to the total. Received money reduces only the running balance.</p>
           </div>
           <div className="text-sm text-muted-foreground flex items-center gap-2">
             <Clock3 className="w-4 h-4" />
@@ -554,8 +747,8 @@ export default function CustomerDetails() {
               <thead className="bg-muted text-muted-foreground uppercase text-xs">
                 <tr>
                   <th className="px-6 py-4 font-semibold">Date</th>
-                  <th className="px-6 py-4 font-semibold">Type</th>
-                  <th className="px-6 py-4 font-semibold">Note</th>
+                  <th className="px-6 py-4 font-semibold">Entry</th>
+                  <th className="px-6 py-4 font-semibold">Details</th>
                   <th className="px-6 py-4 font-semibold text-right">Amount</th>
                   <th className="px-6 py-4 font-semibold text-right">Running Balance</th>
                   <th className="px-6 py-4 font-semibold text-right">Action</th>
@@ -576,18 +769,21 @@ export default function CustomerDetails() {
                             : "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
                         )}
                       >
-                        {entry.type === "CREDIT" ? "Credit" : "Payment"}
+                        {entry.type === "CREDIT" ? "Bill / Credit" : "Received"}
                       </span>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="font-medium">{entry.note || (entry.type === "CREDIT" ? "Manual credit" : "Manual payment")}</div>
+                      <div className="font-medium">{getEntryLabel(entry)}</div>
+                      <div className="text-xs text-muted-foreground mt-1">{getEntryNote(entry)}</div>
                       {entry.billId ? (
                         <div className="mt-1">
-                          <Link href={`/bills/${entry.billId}`}>
-                            <span className="text-xs text-primary hover:underline font-mono cursor-pointer">
-                              Open Bill #{entry.billId}
-                            </span>
-                          </Link>
+                          <button
+                            type="button"
+                            className="text-xs text-primary hover:underline font-mono cursor-pointer"
+                            onClick={() => openBillFromLedger(entry.billId!)}
+                          >
+                            Open Bill #{entry.billId}
+                          </button>
                         </div>
                       ) : null}
                     </td>
@@ -597,7 +793,7 @@ export default function CustomerDetails() {
                         entry.type === "CREDIT" ? "text-red-600" : "text-green-600",
                       )}
                     >
-                      {entry.type === "CREDIT" ? "+" : "-"}
+                      {entry.type === "CREDIT" ? "+" : "Received "}
                       {formatCurrencyINR(Number(entry.amount || 0))}
                     </td>
                     <td
@@ -663,7 +859,7 @@ export default function CustomerDetails() {
                   autoFocus
                   type="number"
                   min="0"
-                  step="0.01"
+                  step="1"
                   value={entryAmount}
                   onChange={(e) => setEntryAmount(e.target.value)}
                   placeholder={entryMode === "CREDIT" ? "Enter credit amount" : "Enter payment amount"}
@@ -674,7 +870,7 @@ export default function CustomerDetails() {
                 <Input
                   value={entryNote}
                   onChange={(e) => setEntryNote(e.target.value)}
-                  placeholder={entryMode === "CREDIT" ? "e.g., Home delivery pending" : "e.g., Cash payment"}
+                  placeholder={entryMode === "CREDIT" ? "Reason for credit" : "Payment note, not customer name"}
                 />
               </div>
               {entryMode === "PAYMENT" ? (
@@ -720,6 +916,10 @@ export default function CustomerDetails() {
                   </PopoverContent>
                 </Popover>
               </div>
+              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                This {entryMode === "CREDIT" ? "credit" : "payment"} will be saved to{" "}
+                <span className="font-semibold text-foreground">{customer.name}</span>. The note is only a description.
+              </div>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={closeEntryDialog}>
@@ -754,7 +954,7 @@ export default function CustomerDetails() {
                 <Input
                   autoFocus
                   type="number"
-                  step="0.01"
+                  step="1"
                   value={profitAmount}
                   onChange={(e) => setProfitAmount(e.target.value)}
                   placeholder="Enter total profit"
@@ -792,7 +992,7 @@ export default function CustomerDetails() {
                 <Input
                   autoFocus
                   type="number"
-                  step="0.01"
+                  step="1"
                   value={dailyProfitAmount}
                   onChange={(e) => setDailyProfitAmount(e.target.value)}
                   placeholder="Enter day-wise profit"

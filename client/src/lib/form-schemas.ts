@@ -14,8 +14,8 @@ export const productFormSchema = z.object({
   secondaryUnit: z.enum(UNIT_OPTIONS).nullable().optional(),
   unitConversion: z.coerce.number().int().min(2, "Conversion must be at least 2").nullable().optional(),
   sku: z.string().trim().optional(),
-  stock: z.coerce.number().int().min(0, "Stock cannot be negative").default(0),
-  lowStockThreshold: z.coerce.number().int().min(0, "Threshold cannot be negative").default(10),
+  stock: z.coerce.number().min(0, "Stock cannot be negative").default(0),
+  lowStockThreshold: z.coerce.number().min(0, "Threshold cannot be negative").default(10),
 }).superRefine((value, ctx) => {
   if (value.secondaryUnit && value.secondaryUnit === value.primaryUnit) {
     ctx.addIssue({

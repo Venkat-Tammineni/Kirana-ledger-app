@@ -10,24 +10,25 @@ interface MetricCardProps {
   className?: string;
   subValue?: string;
   clickable?: boolean;
+  titleClassName?: string;
 }
 
-export function MetricCard({ title, value, icon, trend, trendUp, className, subValue, clickable }: MetricCardProps) {
+export function MetricCard({ title, value, icon, trend, trendUp, className, subValue, clickable, titleClassName }: MetricCardProps) {
   return (
     <div className={cn(
-      "bg-card rounded-2xl p-6 border border-border/50 shadow-sm hover:shadow-md transition-all duration-300",
+      "min-w-0 bg-card rounded-2xl p-6 border border-border/50 shadow-sm hover:shadow-md transition-all duration-300",
       clickable && "cursor-pointer hover:-translate-y-0.5",
       className
     )}>
-      <div className="flex justify-between items-start">
-        <div>
-          <p className="text-sm font-medium text-muted-foreground mb-1">{title}</p>
-          <h3 className="text-3xl font-display font-bold text-foreground tracking-tight">{value}</h3>
+      <div className="flex min-w-0 items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <p className={cn("mb-1 break-words text-sm font-medium text-muted-foreground", titleClassName)}>{title}</p>
+          <h3 className="whitespace-nowrap text-xl font-display font-bold leading-tight tracking-tight text-foreground sm:text-2xl">{value}</h3>
           {subValue && (
-            <p className="text-xs text-muted-foreground mt-1">{subValue}</p>
+            <p className="mt-1 break-words text-xs text-muted-foreground">{subValue}</p>
           )}
         </div>
-        <div className="p-3 bg-primary/10 rounded-xl text-primary">
+        <div className="shrink-0 rounded-xl bg-primary/10 p-3 text-primary">
           {icon}
         </div>
       </div>

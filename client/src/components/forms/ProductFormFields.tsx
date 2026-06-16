@@ -7,15 +7,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatCurrencyINR } from "@/lib/format";
 import {
   deriveUnitPriceFromBase,
-  fromBaseQuantity,
+  getAvailableUnits,
   getBaseUnit,
   getPrimaryUnit,
+  getUnitMultiplierToBase,
   hasSecondaryUnit,
   normalizeUnitPriceToBase,
-  toBaseQuantity,
   UNIT_OPTIONS,
   type UnitOption,
 } from "@shared/units";
@@ -48,6 +47,32 @@ function getFirstDifferentUnit(unit: UnitOption): UnitOption {
   return UNIT_OPTIONS.find((option) => option !== unit) || "PCS";
 }
 
+function formatConvertedNumber(value: number): string {
+  if (!Number.isFinite(value)) return "";
+  return Number(value.toFixed(3)).toString();
+}
+
+function convertUnitPrice(value: string, unitConfig: Parameters<typeof normalizeUnitPriceToBase>[1], fromUnit: UnitOption, toUnit: UnitOption): string {
+  if (value.trim() === "") return value;
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return value;
+
+  const basePrice = normalizeUnitPriceToBase(numericValue, unitConfig, fromUnit);
+  return formatConvertedNumber(deriveUnitPriceFromBase(basePrice, unitConfig, toUnit));
+}
+
+function convertQuantity(value: string, unitConfig: Parameters<typeof getUnitMultiplierToBase>[0], fromUnit: UnitOption, toUnit: UnitOption): string {
+  if (value.trim() === "") return value;
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return value;
+
+  const baseQuantity = numericValue * getUnitMultiplierToBase(unitConfig, fromUnit);
+  const nextMultiplier = getUnitMultiplierToBase(unitConfig, toUnit);
+  if (!nextMultiplier) return value;
+
+  return formatConvertedNumber(baseQuantity / nextMultiplier);
+}
+
 export function ProductFormFields({
   value,
   onChange,
@@ -63,21 +88,7 @@ export function ProductFormFields({
   const showSecondary = hasSecondaryUnit(unitConfig);
   const primaryUnit = getPrimaryUnit(unitConfig);
   const baseUnit = getBaseUnit(unitConfig);
-
-  const salePriceNumber = Number(value.price || 0);
-  const costPriceNumber = Number(value.costPrice || 0);
-  const baseSalePrice = normalizeUnitPriceToBase(salePriceNumber, unitConfig, value.priceInputUnit);
-  const baseCostPrice = normalizeUnitPriceToBase(costPriceNumber, unitConfig, value.costPriceInputUnit);
-  const primarySalePrice = deriveUnitPriceFromBase(baseSalePrice, unitConfig, primaryUnit);
-  const secondarySalePrice = deriveUnitPriceFromBase(baseSalePrice, unitConfig, baseUnit);
-  const primaryCostPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, primaryUnit);
-  const secondaryCostPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, baseUnit);
-  const stockNumber = Number(value.stock || 0);
-  const lowStockThresholdNumber = Number(value.lowStockThreshold || 0);
-  const baseStockQuantity = toBaseQuantity(stockNumber, unitConfig, value.stockInputUnit);
-  const baseLowStockThreshold = toBaseQuantity(lowStockThresholdNumber, unitConfig, value.stockInputUnit);
-  const primaryStockQuantity = fromBaseQuantity(baseStockQuantity, unitConfig, primaryUnit);
-  const secondaryStockQuantity = fromBaseQuantity(baseStockQuantity, unitConfig, baseUnit);
+  const availableUnits = getAvailableUnits(unitConfig);
 
   return (
     <div className="space-y-3 py-3">
@@ -105,7 +116,6 @@ export function ProductFormFields({
         <div className="flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-medium">Unit Setup</p>
-            <p className="text-xs text-muted-foreground">Base storage always uses the lower unit.</p>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">Secondary Unit</span>
@@ -194,17 +204,11 @@ export function ProductFormFields({
           )}
         </div>
 
-        <div className="text-xs text-muted-foreground">
-          {showSecondary
-            ? `1 ${primaryUnit} = ${Number(value.unitConversion || 0)} ${baseUnit}. Stock and prices will be stored in ${baseUnit}.`
-            : `Single-unit item. Stock and prices will be stored in ${baseUnit}.`}
-        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-card p-3 space-y-3">
         <div>
           <p className="text-sm font-medium">Pricing</p>
-          <p className="text-xs text-muted-foreground">Enter the price in either unit and the other side will auto-derive.</p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -222,13 +226,20 @@ export function ProductFormFields({
               />
               <Select
                 value={value.priceInputUnit}
-                onValueChange={(next) => onChange({ ...value, priceInputUnit: next as UnitOption })}
+                onValueChange={(next) => {
+                  const nextUnit = next as UnitOption;
+                  onChange({
+                    ...value,
+                    price: convertUnitPrice(value.price, unitConfig, value.priceInputUnit, nextUnit),
+                    priceInputUnit: nextUnit,
+                  });
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {[primaryUnit, ...(showSecondary ? [baseUnit] : [])].map((unit) => (
+                  {availableUnits.map((unit) => (
                     <SelectItem key={unit} value={unit}>
                       {unit}
                     </SelectItem>
@@ -236,14 +247,6 @@ export function ProductFormFields({
                 </SelectContent>
               </Select>
             </div>
-            <div className="text-xs text-muted-foreground">
-              Stored base price: {formatCurrencyINR(baseSalePrice)} / {baseUnit}
-            </div>
-            {showSecondary && (
-              <div className="text-xs text-muted-foreground">
-                {formatCurrencyINR(primarySalePrice)} / {primaryUnit} and {formatCurrencyINR(secondarySalePrice)} / {baseUnit}
-              </div>
-            )}
           </div>
 
           <div className="space-y-2">
@@ -260,13 +263,20 @@ export function ProductFormFields({
               />
               <Select
                 value={value.costPriceInputUnit}
-                onValueChange={(next) => onChange({ ...value, costPriceInputUnit: next as UnitOption })}
+                onValueChange={(next) => {
+                  const nextUnit = next as UnitOption;
+                  onChange({
+                    ...value,
+                    costPrice: convertUnitPrice(value.costPrice, unitConfig, value.costPriceInputUnit, nextUnit),
+                    costPriceInputUnit: nextUnit,
+                  });
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {[primaryUnit, ...(showSecondary ? [baseUnit] : [])].map((unit) => (
+                  {availableUnits.map((unit) => (
                     <SelectItem key={unit} value={unit}>
                       {unit}
                     </SelectItem>
@@ -274,14 +284,6 @@ export function ProductFormFields({
                 </SelectContent>
               </Select>
             </div>
-            <div className="text-xs text-muted-foreground">
-              Stored base cost: {formatCurrencyINR(baseCostPrice)} / {baseUnit}
-            </div>
-            {showSecondary && (
-              <div className="text-xs text-muted-foreground">
-                {formatCurrencyINR(primaryCostPrice)} / {primaryUnit} and {formatCurrencyINR(secondaryCostPrice)} / {baseUnit}
-              </div>
-            )}
           </div>
         </div>
       </div>
@@ -306,15 +308,21 @@ export function ProductFormFields({
             <Select
               value={value.stockInputUnit}
               onValueChange={(next) => {
+                const nextUnit = next as UnitOption;
                 onStockInputUnitChange?.();
-                onChange({ ...value, stockInputUnit: next as UnitOption });
+                onChange({
+                  ...value,
+                  stock: convertQuantity(value.stock, unitConfig, value.stockInputUnit, nextUnit),
+                  lowStockThreshold: convertQuantity(value.lowStockThreshold, unitConfig, value.stockInputUnit, nextUnit),
+                  stockInputUnit: nextUnit,
+                });
               }}
             >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {[primaryUnit, ...(showSecondary ? [baseUnit] : [])].map((unit) => (
+                {availableUnits.map((unit) => (
                   <SelectItem key={unit} value={unit}>
                     {unit}
                   </SelectItem>
@@ -322,14 +330,6 @@ export function ProductFormFields({
               </SelectContent>
             </Select>
           </div>
-          <div className="text-xs text-muted-foreground">
-            Stored stock: {baseStockQuantity} {baseUnit}
-          </div>
-          {showSecondary && (
-            <div className="text-xs text-muted-foreground">
-              {primaryStockQuantity} {primaryUnit} and {secondaryStockQuantity} {baseUnit}
-            </div>
-          )}
         </div>
         <div className="space-y-2">
           <label className="text-sm font-medium">Low Stock Alert</label>
@@ -345,9 +345,6 @@ export function ProductFormFields({
               onChange({ ...value, lowStockThreshold: e.target.value });
             }}
           />
-          <div className="text-xs text-muted-foreground">
-            Threshold uses {value.stockInputUnit} input and stores as {baseLowStockThreshold} {baseUnit}.
-          </div>
         </div>
       </div>
     </div>

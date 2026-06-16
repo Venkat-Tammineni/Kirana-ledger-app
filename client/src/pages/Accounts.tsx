@@ -28,6 +28,7 @@ import { ArrowRight, CircleHelp, Landmark, Minus, Plus, Trash2, Wallet } from "l
 import { formatCurrencyINR } from "@/lib/format";
 import { useToast } from "@/hooks/use-toast";
 import { VoiceAssistant } from "@/components/VoiceAssistant";
+import { CustomerDeductionSelect } from "@/components/CustomerDeductionSelect";
 
 type AccountSummary = { id: number; name: string; currentBalance: number; totalSpent: number };
 
@@ -130,7 +131,7 @@ function AccountCard({
   setCreditNote: (value: string) => void;
   creditCustomerId: number | null;
   setCreditCustomerId: (value: number | null) => void;
-  customers: Array<{ id: number; name: string; phone: string }> | undefined;
+  customers: Array<{ id: number; name: string; phone: string; balance?: number }> | undefined;
   spending: boolean;
   crediting: boolean;
   deletingSafe: boolean;
@@ -150,7 +151,7 @@ function AccountCard({
     const query = creditNote.trim().toLowerCase();
     if (!query) return customers || [];
     const matches = (customers || []).filter(
-      (customer: { id: number; name: string; phone: string }) =>
+      (customer: { id: number; name: string; phone: string; balance?: number }) =>
         customer.name.toLowerCase().includes(query) ||
         customer.phone.toLowerCase().includes(query),
     );
@@ -231,18 +232,11 @@ function AccountCard({
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Customer to deduct from (Optional)</label>
-                  <select
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={creditCustomerId || ""}
-                    onChange={(e) => setCreditCustomerId(e.target.value ? Number(e.target.value) : null)}
-                  >
-                    <option value="">Do not deduct customer balance</option>
-                    {matchingCustomers.map((customer) => (
-                      <option key={customer.id} value={customer.id}>
-                        {customer.name} ({customer.phone})
-                      </option>
-                    ))}
-                  </select>
+                  <CustomerDeductionSelect
+                    customers={matchingCustomers}
+                    value={creditCustomerId}
+                    onChange={setCreditCustomerId}
+                  />
                   <p className="text-xs text-muted-foreground">
                     If you select a customer here, the same amount will be recorded as their payment too.
                   </p>
@@ -464,6 +458,24 @@ export default function Accounts() {
     [accounts, customers],
   );
 
+  const orderedAccounts = useMemo(() => {
+    const list = [...(accounts || [])];
+    const priority = new Map<string, number>([
+      ["ganesh", 0],
+      ["ganesh sbi", 2],
+    ]);
+
+    return list.sort((left, right) => {
+      const leftName = left.name.trim().toLowerCase();
+      const rightName = right.name.trim().toLowerCase();
+      const leftPriority = priority.get(leftName) ?? 1;
+      const rightPriority = priority.get(rightName) ?? 1;
+
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+      return left.id - right.id;
+    });
+  }, [accounts]);
+
   return (
     <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8 space-y-6">
@@ -532,7 +544,7 @@ export default function Accounts() {
             manualInvestmentTotal={investmentDetails?.manualInvestmentTotal || 0}
             openDetails={() => setLocation("/accounts/investment")}
           />
-          {accounts?.map((account) => (
+          {orderedAccounts.map((account) => (
             <AccountCard
               key={account.id}
               account={account}

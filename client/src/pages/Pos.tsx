@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchLastBilledItemMemory,
+  fetchPreviousBill,
   useAccounts,
   useCreateBill,
   useCreateProduct,
@@ -8,8 +9,9 @@ import {
   useLastBilledItemMemory,
   useProducts,
 } from "@/hooks/use-pos";
-import { Search, Plus, Trash2, IndianRupee, Save, CreditCard, UserPlus, CalendarIcon, ShoppingBag } from "lucide-react";
+import { Search, Plus, Trash2, IndianRupee, Save, CreditCard, UserPlus, CalendarIcon, ShoppingBag, ClipboardList, History } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
@@ -32,6 +34,7 @@ import { formatCurrencyINR, formatDate, toISTDateTimeStringForApi } from "@/lib/
 import { compactVoiceText, createVoiceSearchKeys, parseBillingLineCommand, parseSpokenAmount } from "@/lib/voice-commands";
 import {
   deriveUnitPriceFromBase,
+  getAvailableUnits,
   getBaseUnit,
   getDefaultSalesUnit,
   getPrimaryUnit,
@@ -79,6 +82,26 @@ interface PendingProductSelection {
 const POS_DRAFT_STORAGE_KEY = "kirana-pos-draft";
 const GRAM_QUICK_OPTIONS = [100, 150, 250, 500] as const;
 const ROUND_OFF_LABEL = "Round Off";
+const DEFAULT_CUSTOM_UNIT: UnitOption = "KG";
+
+function createEmptyCustomItem() {
+  return { name: "", price: "", costPrice: "", quantity: "1", unit: DEFAULT_CUSTOM_UNIT };
+}
+
+function formatStockAvailability(stock: number, displayUnit: UnitOption, baseUnit: UnitOption) {
+  if (baseUnit === "GRAMS" && displayUnit === "KG") {
+    const quantityInKg = stock / 1000;
+    return Number.isInteger(quantityInKg) ? `${quantityInKg} KG` : `${quantityInKg.toFixed(2)} KG`;
+  }
+
+  return `${stock} ${displayUnit}`;
+}
+
+type ParsedBulkItemLine = {
+  name: string;
+  quantity: number;
+  unit: UnitOption | null;
+};
 
 type PosDraftState = {
   cart: CartItem[];
@@ -86,7 +109,7 @@ type PosDraftState = {
   selectedCustomer: number | null;
   extraCharges: ExtraChargeRow[];
   pendingProduct: PendingProductSelection | null;
-  customItem: { name: string; price: string; costPrice: string; quantity: string; unit: UnitOption; addToProducts: boolean };
+  customItem: { name: string; price: string; costPrice: string; quantity: string; unit: UnitOption };
   isPaymentOpen: boolean;
   paidAmount: string;
   paymentAccountId: number | null;
@@ -96,6 +119,70 @@ type PosDraftState = {
 
 function getDefaultBillDate() {
   return parseISTDateOnly(getISTDateKey(new Date()));
+}
+
+function normalizeBulkUnit(value?: string): UnitOption | null {
+  const normalized = value?.trim().toLowerCase().replace(/\./g, "");
+  if (!normalized) return null;
+
+  const unitMap: Record<string, UnitOption> = {
+    bag: "BAG",
+    bags: "BAG",
+    btl: "BOTTLES",
+    bottle: "BOTTLES",
+    bottles: "BOTTLES",
+    box: "BOXES",
+    boxes: "BOXES",
+    can: "CANS",
+    cans: "CANS",
+    carton: "BOXES",
+    cartons: "BOXES",
+    cartoon: "BOXES",
+    cartoons: "BOXES",
+    dozen: "DOZENS",
+    dozens: "DOZENS",
+    g: "GRAMS",
+    gm: "GRAMS",
+    gms: "GRAMS",
+    gram: "GRAMS",
+    grams: "GRAMS",
+    grm: "GRAMS",
+    grms: "GRAMS",
+    kg: "KG",
+    kgs: "KG",
+    kilo: "KG",
+    kilos: "KG",
+    l: "LITRE",
+    litre: "LITRE",
+    litres: "LITRE",
+    ltr: "LITRE",
+    ltrs: "LITRE",
+    pc: "PCS",
+    pcs: "PCS",
+    piece: "PCS",
+    pieces: "PCS",
+  };
+
+  return unitMap[normalized] ?? null;
+}
+
+function parseBulkItemLine(line: string): ParsedBulkItemLine | null {
+  const cleaned = line
+    .replace(/^[\s*#.-]+/, "")
+    .replace(/\s*[-–—:]\s*(?=\d)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const match = cleaned.match(/^(.+?)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z.]+)?$/);
+  if (!match) return null;
+
+  const quantity = Number(match[2]);
+  if (!Number.isFinite(quantity) || quantity <= 0) return null;
+
+  return {
+    name: match[1].trim(),
+    quantity,
+    unit: normalizeBulkUnit(match[3]),
+  };
 }
 
 const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
@@ -129,7 +216,7 @@ const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
   "garam masala": ["garam masla"],
   gasagasalu: ["gas gasalu", "khas khas"],
   "gingelly oil": ["gingili oil", "sesame oil"],
-  gottalu: ["gothalu"],
+  gottalu: ["gothalu", "gundulu"],
   "green colour bush": ["green color bush"],
   "gundu dh": ["gundu d h"],
   "gundu dhh": ["gundu d h h"],
@@ -138,7 +225,8 @@ const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
   "idly lohitha": ["idli lohitha"],
   imly: ["imli"],
   japthri: ["japtri", "japathri"],
-  jera: ["jeera"],
+  jera: ["jeera", "zeera", "jelakera", "jeelakara", "jeelakarra", "cumin"],
+  "jera powder": ["jeera powder", "zeera powder", "jelakera powder", "jeelakara powder", "jeelakarra powder", "cumin powder"],
   kaju: ["kaju 2p", "cashew"],
   "kaju chura n2": ["kaju chura n 2", "kaju chura number 2"],
   "kaju chura no.1": ["kaju chura no 1", "kaju chura number 1"],
@@ -155,7 +243,7 @@ const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
   "milky maid": ["milkmaid"],
   milmaker: ["meal maker"],
   "mirchi powder": ["mirchi", "chili powder", "chilli powder"],
-  miryalu: ["mirialu", "pepper"],
+  miryalu: ["mirialu", "miriyalu", "miriyallu", "pepper"],
   "moong dal": ["mung dal"],
   "mtr sambar": ["m t r sambar"],
   noodles: ["nudles"],
@@ -187,7 +275,7 @@ const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
   shajera: ["shajeera", "sha jeera"],
   "soap surfexcel": ["surf excel soap", "soap surf excel", "surfexcel"],
   soda: ["soda powder"],
-  sooji: ["suji", "sooji rava"],
+  sooji: ["suji", "sujji", "suji rava", "sujji rava", "sooji rava"],
   "sooji sh": ["suji sh", "sooji s h"],
   "soya sause": ["soya sauce", "soya sause", "soy sauce"],
   "split urad dal": ["split ured dal", "urad dal", "urad"],
@@ -201,6 +289,64 @@ const PRODUCT_VOICE_ALIASES: Record<string, string[]> = {
   vineger: ["vinegar", "winiger"],
   "yellow colour bush": ["yellow color bush"],
 };
+
+const PRODUCT_CANONICAL_WORDS: Record<string, string> = {
+  alam: "allam",
+  aavaalu: "avalu",
+  aavalu: "avalu",
+  basmathi: "basmati",
+  beasan: "besan",
+  beshan: "besan",
+  belam: "bellam",
+  chaki: "chakki",
+  chilli: "mirchi",
+  chili: "mirchi",
+  corriander: "dhaniya",
+  coriander: "dhaniya",
+  cumin: "jera",
+  daniya: "dhaniya",
+  daniyalu: "dhaniyalu",
+  dhal: "dal",
+  elaichi: "elachi",
+  imli: "imly",
+  jeera: "jera",
+  jeelakara: "jera",
+  jeelakarra: "jera",
+  jeelakera: "jera",
+  jelakara: "jera",
+  jelakarra: "jera",
+  jelakera: "jera",
+  mirialu: "miryalu",
+  miriyalu: "miryalu",
+  miriyallu: "miryalu",
+  pasupu: "pasupu",
+  suji: "sooji",
+  sujji: "sooji",
+  zeera: "jera",
+};
+
+function canonicalizeProductQuery(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => PRODUCT_CANONICAL_WORDS[word] ?? word)
+    .join(" ");
+}
+
+function normalizeQuantityInputForUnit(value: string | number, unit: UnitOption) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) return 1;
+  const isDecimalGramInput =
+    unit === "GRAMS" &&
+    (typeof value === "string" ? value.includes(".") : !Number.isInteger(value));
+  if (isDecimalGramInput) {
+    return Math.round(numericValue * 1000);
+  }
+  return numericValue;
+}
 
 const DIRECT_PRODUCT_VOICE_TARGETS: Record<string, string> = {
   "allam paste": "allam paste",
@@ -322,11 +468,15 @@ export default function Pos() {
   const [extraCharges, setExtraCharges] = useState<ExtraChargeRow[]>([]);
   const [pendingProduct, setPendingProduct] = useState<PendingProductSelection | null>(null);
   const [gramQuantityPickerItemId, setGramQuantityPickerItemId] = useState<string | null>(null);
+  const [gramQuantityDrafts, setGramQuantityDrafts] = useState<Record<string, string>>({});
   
   // Custom item state
   const [isCustomItemOpen, setIsCustomItemOpen] = useState(false);
-  const [customItem, setCustomItem] = useState({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS" as UnitOption, addToProducts: false });
+  const [customItem, setCustomItem] = useState(createEmptyCustomItem);
+  const [addCustomItemToProducts, setAddCustomItemToProducts] = useState(false);
   const [isCustomGramPickerOpen, setIsCustomGramPickerOpen] = useState(false);
+  const [isBulkAddOpen, setIsBulkAddOpen] = useState(false);
+  const [bulkAddText, setBulkAddText] = useState("");
 
   // Payment dialog state
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
@@ -334,8 +484,11 @@ export default function Pos() {
   const [paymentAccountId, setPaymentAccountId] = useState<number | null>(null);
   const [billDate, setBillDate] = useState<Date | undefined>(() => getDefaultBillDate());
   const [billDateManuallyChanged, setBillDateManuallyChanged] = useState(false);
+  const [isBillDatePickerOpen, setIsBillDatePickerOpen] = useState(false);
+  const [isPaymentBillDatePickerOpen, setIsPaymentBillDatePickerOpen] = useState(false);
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
   const [chargesOpen, setChargesOpen] = useState(false);
+  const [isLoadingPreviousBill, setIsLoadingPreviousBill] = useState(false);
   const trimmedCustomItemName = customItem.name.trim();
   const { data: customItemMemory } = useLastBilledItemMemory(
     selectedCustomer && trimmedCustomItemName
@@ -366,9 +519,16 @@ export default function Pos() {
             }
           : null,
       );
-      setCustomItem(
-        parsed.customItem ?? { name: "", price: "", costPrice: "", quantity: "1", unit: "PCS" as UnitOption, addToProducts: false },
-      );
+      const savedCustomItem = parsed.customItem;
+      setCustomItem({
+        name: savedCustomItem?.name ?? "",
+        price: savedCustomItem?.price ?? "",
+        costPrice: savedCustomItem?.costPrice ?? "",
+        quantity: savedCustomItem?.quantity ?? "1",
+        unit: UNIT_OPTIONS.includes(savedCustomItem?.unit as UnitOption)
+          ? (savedCustomItem?.unit as UnitOption)
+          : DEFAULT_CUSTOM_UNIT,
+      });
       setIsPaymentOpen(Boolean(parsed.isPaymentOpen));
       setPaidAmount(typeof parsed.paidAmount === "string" ? parsed.paidAmount : "");
       setPaymentAccountId(typeof parsed.paymentAccountId === "number" ? parsed.paymentAccountId : null);
@@ -427,7 +587,7 @@ export default function Pos() {
       const shouldApplyPrice = current.price.trim().length === 0;
       const shouldApplyCostPrice = current.costPrice.trim().length === 0 || Number(current.costPrice) === 0;
       const shouldApplyQuantity = current.quantity.trim().length === 0 || Number(current.quantity) === 1;
-      const shouldApplyUnit = current.unit === "PCS";
+      const shouldApplyUnit = current.unit === DEFAULT_CUSTOM_UNIT;
 
       if (!shouldApplyPrice && !shouldApplyCostPrice && !shouldApplyQuantity && !shouldApplyUnit) {
         return current;
@@ -450,8 +610,10 @@ export default function Pos() {
     setExtraCharges([]);
     setPendingProduct(null);
     setIsCustomItemOpen(false);
-    setCustomItem({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS", addToProducts: false });
+    setCustomItem(createEmptyCustomItem());
     setIsCustomGramPickerOpen(false);
+    setIsBulkAddOpen(false);
+    setBulkAddText("");
     setIsPaymentOpen(false);
     setPaidAmount("");
     setPaymentAccountId(null);
@@ -558,10 +720,15 @@ export default function Pos() {
 
   const findProductByVoice = (query: string) => {
     const queryKeys = createVoiceSearchKeys(query);
+    const canonicalQuery = canonicalizeProductQuery(query);
+    const canonicalQueryKeys = createVoiceSearchKeys(canonicalQuery);
     const directTargetName =
       DIRECT_PRODUCT_VOICE_TARGETS[query.trim().toLowerCase()] ||
       DIRECT_PRODUCT_VOICE_TARGETS[queryKeys.normalized] ||
-      DIRECT_PRODUCT_VOICE_TARGETS[queryKeys.compact];
+      DIRECT_PRODUCT_VOICE_TARGETS[queryKeys.compact] ||
+      DIRECT_PRODUCT_VOICE_TARGETS[canonicalQuery] ||
+      DIRECT_PRODUCT_VOICE_TARGETS[canonicalQueryKeys.normalized] ||
+      DIRECT_PRODUCT_VOICE_TARGETS[canonicalQueryKeys.compact];
 
     if (directTargetName) {
       const directTargetKeys = createVoiceSearchKeys(directTargetName);
@@ -600,8 +767,12 @@ export default function Pos() {
       .map((product) => {
         const productName = product.name.trim().toLowerCase();
         const productKeys = createVoiceSearchKeys(product.name);
+        const canonicalProductKeys = createVoiceSearchKeys(canonicalizeProductQuery(product.name));
         const aliasNames = PRODUCT_VOICE_ALIASES[productName] || [];
-        const aliasKeys = aliasNames.map((alias) => createVoiceSearchKeys(alias));
+        const aliasKeys = [
+          ...aliasNames.map((alias) => createVoiceSearchKeys(alias)),
+          ...aliasNames.map((alias) => createVoiceSearchKeys(canonicalizeProductQuery(alias))),
+        ];
         const availableStock = Number(product.stock || 0);
 
         let score = 0;
@@ -609,12 +780,21 @@ export default function Pos() {
         if (productKeys.normalized === queryKeys.normalized) score += 1200;
         if (productKeys.compact === queryKeys.compact) score += 1050;
         if (productKeys.phoneticCompact === queryKeys.phoneticCompact) score += 1000;
+        if (canonicalProductKeys.normalized === canonicalQueryKeys.normalized) score += 1180;
+        if (canonicalProductKeys.compact === canonicalQueryKeys.compact) score += 1040;
+        if (canonicalProductKeys.phoneticCompact === canonicalQueryKeys.phoneticCompact) score += 990;
         if (productKeys.normalized.startsWith(queryKeys.normalized)) score += 760;
         if (productKeys.compact.startsWith(queryKeys.compact)) score += 720;
         if (productKeys.phoneticCompact.startsWith(queryKeys.phoneticCompact)) score += 700;
+        if (canonicalProductKeys.normalized.startsWith(canonicalQueryKeys.normalized)) score += 750;
+        if (canonicalProductKeys.compact.startsWith(canonicalQueryKeys.compact)) score += 710;
+        if (canonicalProductKeys.phoneticCompact.startsWith(canonicalQueryKeys.phoneticCompact)) score += 690;
         if (productKeys.normalized.includes(queryKeys.normalized)) score += 560;
         if (productKeys.compact.includes(queryKeys.compact)) score += 520;
         if (productKeys.phoneticCompact.includes(queryKeys.phoneticCompact)) score += 500;
+        if (canonicalProductKeys.normalized.includes(canonicalQueryKeys.normalized)) score += 550;
+        if (canonicalProductKeys.compact.includes(canonicalQueryKeys.compact)) score += 510;
+        if (canonicalProductKeys.phoneticCompact.includes(canonicalQueryKeys.phoneticCompact)) score += 490;
 
         const tokenHits = queryKeys.tokens.filter((token) =>
           productKeys.tokens.some((productToken) => {
@@ -634,6 +814,15 @@ export default function Pos() {
         ).length;
         score += phoneticTokenHits * 130;
 
+        const canonicalTokenHits = canonicalQueryKeys.tokens.filter((token) =>
+          canonicalProductKeys.tokens.some((productToken) => {
+            if (productToken === token) return true;
+            if (productToken.includes(token) || token.includes(productToken)) return true;
+            return levenshtein(productToken, token) <= 1;
+          }),
+        ).length;
+        score += canonicalTokenHits * 155;
+
         const compactDistance = levenshtein(productKeys.compact, queryKeys.compact);
         const compactMaxLength = Math.max(productKeys.compact.length, queryKeys.compact.length, 1);
         const similarity = 1 - compactDistance / compactMaxLength;
@@ -642,8 +831,18 @@ export default function Pos() {
         const phoneticMaxLength = Math.max(productKeys.phoneticCompact.length, queryKeys.phoneticCompact.length, 1);
         const phoneticSimilarity = 1 - phoneticDistance / phoneticMaxLength;
 
+        const canonicalCompactDistance = levenshtein(canonicalProductKeys.compact, canonicalQueryKeys.compact);
+        const canonicalCompactMaxLength = Math.max(canonicalProductKeys.compact.length, canonicalQueryKeys.compact.length, 1);
+        const canonicalSimilarity = 1 - canonicalCompactDistance / canonicalCompactMaxLength;
+
+        const canonicalPhoneticDistance = levenshtein(canonicalProductKeys.phoneticCompact, canonicalQueryKeys.phoneticCompact);
+        const canonicalPhoneticMaxLength = Math.max(canonicalProductKeys.phoneticCompact.length, canonicalQueryKeys.phoneticCompact.length, 1);
+        const canonicalPhoneticSimilarity = 1 - canonicalPhoneticDistance / canonicalPhoneticMaxLength;
+
         score += Math.round(similarity * 280);
         score += Math.round(phoneticSimilarity * 320);
+        score += Math.round(canonicalSimilarity * 300);
+        score += Math.round(canonicalPhoneticSimilarity * 340);
 
         let aliasSimilarity = 0;
         let aliasPhoneticSimilarity = 0;
@@ -653,6 +852,9 @@ export default function Pos() {
           if (aliasKey.normalized === queryKeys.normalized) aliasBoost = Math.max(aliasBoost, 1200);
           if (aliasKey.compact === queryKeys.compact) aliasBoost = Math.max(aliasBoost, 1050);
           if (aliasKey.phoneticCompact === queryKeys.phoneticCompact) aliasBoost = Math.max(aliasBoost, 1000);
+          if (aliasKey.normalized === canonicalQueryKeys.normalized) aliasBoost = Math.max(aliasBoost, 1180);
+          if (aliasKey.compact === canonicalQueryKeys.compact) aliasBoost = Math.max(aliasBoost, 1040);
+          if (aliasKey.phoneticCompact === canonicalQueryKeys.phoneticCompact) aliasBoost = Math.max(aliasBoost, 990);
           if (aliasKey.normalized.startsWith(queryKeys.normalized)) aliasBoost = Math.max(aliasBoost, 760);
           if (aliasKey.compact.startsWith(queryKeys.compact)) aliasBoost = Math.max(aliasBoost, 720);
           if (aliasKey.phoneticCompact.startsWith(queryKeys.phoneticCompact)) aliasBoost = Math.max(aliasBoost, 700);
@@ -672,12 +874,21 @@ export default function Pos() {
           const currentAliasDistance = levenshtein(aliasKey.compact, queryKeys.compact);
           const currentAliasMaxLength = Math.max(aliasKey.compact.length, queryKeys.compact.length, 1);
           aliasSimilarity = Math.max(aliasSimilarity, 1 - currentAliasDistance / currentAliasMaxLength);
+          const currentCanonicalAliasDistance = levenshtein(aliasKey.compact, canonicalQueryKeys.compact);
+          const currentCanonicalAliasMaxLength = Math.max(aliasKey.compact.length, canonicalQueryKeys.compact.length, 1);
+          aliasSimilarity = Math.max(aliasSimilarity, 1 - currentCanonicalAliasDistance / currentCanonicalAliasMaxLength);
 
           const currentAliasPhoneticDistance = levenshtein(aliasKey.phoneticCompact, queryKeys.phoneticCompact);
           const currentAliasPhoneticMaxLength = Math.max(aliasKey.phoneticCompact.length, queryKeys.phoneticCompact.length, 1);
           aliasPhoneticSimilarity = Math.max(
             aliasPhoneticSimilarity,
             1 - currentAliasPhoneticDistance / currentAliasPhoneticMaxLength,
+          );
+          const currentCanonicalAliasPhoneticDistance = levenshtein(aliasKey.phoneticCompact, canonicalQueryKeys.phoneticCompact);
+          const currentCanonicalAliasPhoneticMaxLength = Math.max(aliasKey.phoneticCompact.length, canonicalQueryKeys.phoneticCompact.length, 1);
+          aliasPhoneticSimilarity = Math.max(
+            aliasPhoneticSimilarity,
+            1 - currentCanonicalAliasPhoneticDistance / currentCanonicalAliasPhoneticMaxLength,
           );
         }
 
@@ -695,8 +906,8 @@ export default function Pos() {
           product,
           score,
           nameLength: productName.length,
-          similarity: Math.max(similarity, aliasSimilarity),
-          phoneticSimilarity: Math.max(phoneticSimilarity, aliasPhoneticSimilarity),
+          similarity: Math.max(similarity, canonicalSimilarity, aliasSimilarity),
+          phoneticSimilarity: Math.max(phoneticSimilarity, canonicalPhoneticSimilarity, aliasPhoneticSimilarity),
           availableStock,
         };
       })
@@ -793,6 +1004,247 @@ export default function Pos() {
     });
     setSearchTerm("");
     return true;
+  };
+
+  const createCartItemFromProduct = (
+    product: any,
+    quantity: number,
+    requestedUnit?: UnitOption | null,
+  ): CartItem => {
+    const unitConfig = {
+      primaryUnit: product.primaryUnit,
+      secondaryUnit: product.secondaryUnit,
+      unitConversion: product.unitConversion,
+    };
+    const availableUnits = new Set<UnitOption>([
+      getPrimaryUnit(unitConfig),
+      ...(hasSecondaryUnit(unitConfig) ? [product.secondaryUnit as UnitOption] : []),
+    ]);
+    const defaultUnit = getDefaultSalesUnit(unitConfig);
+    const unit = requestedUnit && availableUnits.has(requestedUnit) ? requestedUnit : defaultUnit;
+    const basePrice = Number(product.price || 0);
+    const baseCostPrice = Number(product.costPrice || 0);
+
+    return {
+      tempId: crypto.randomUUID(),
+      productId: product.id,
+      name: product.name,
+      price: deriveUnitPriceFromBase(basePrice, unitConfig, unit),
+      basePrice,
+      costPrice: deriveUnitPriceFromBase(baseCostPrice, unitConfig, unit),
+      baseCostPrice,
+      quantity,
+      unit,
+      primaryUnit: getPrimaryUnit(unitConfig),
+      secondaryUnit: hasSecondaryUnit(unitConfig) ? (product.secondaryUnit as UnitOption) : null,
+      unitConversion: product.unitConversion ?? null,
+    };
+  };
+
+  const mergeCartItems = (existingCart: CartItem[], itemsToAdd: CartItem[]) => {
+    const nextCart = [...existingCart];
+
+    for (const nextItem of itemsToAdd) {
+      const existingIndex = nextCart.findIndex(
+        (item) =>
+          item.productId === nextItem.productId &&
+          item.name.trim().toLowerCase() === nextItem.name.trim().toLowerCase() &&
+          item.unit === nextItem.unit &&
+          Math.abs(item.price - nextItem.price) < 0.0001,
+      );
+
+      if (existingIndex >= 0) {
+        nextCart[existingIndex] = {
+          ...nextCart[existingIndex],
+          quantity: nextCart[existingIndex].quantity + nextItem.quantity,
+        };
+      } else {
+        nextCart.push(nextItem);
+      }
+    }
+
+    return nextCart;
+  };
+
+  const addPreviousBillItemsToCart = async () => {
+    if (!selectedCustomer) {
+      toast({
+        title: "Select customer",
+        description: "Choose the customer first, then use Previous Bill.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsLoadingPreviousBill(true);
+    try {
+      const previousBill = await fetchPreviousBill(selectedCustomer);
+
+      if (!previousBill || previousBill.items.length === 0) {
+        toast({
+          title: "No previous bill",
+          description: "This customer does not have an earlier completed bill.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const itemsToAdd: CartItem[] = previousBill.items.map((item) => {
+        const unit = UNIT_OPTIONS.includes(item.unit as UnitOption) ? (item.unit as UnitOption) : "PCS";
+        const matchedProduct = products?.find((product) => product.id === item.productId);
+        const quantity = Math.max(1, Number(item.quantity || 1));
+        const price = Math.max(0, Number(item.price || 0));
+
+        if (matchedProduct) {
+          const unitConfig = {
+            primaryUnit: matchedProduct.primaryUnit,
+            secondaryUnit: matchedProduct.secondaryUnit,
+            unitConversion: matchedProduct.unitConversion,
+          };
+          const baseCostPrice = Number(matchedProduct.costPrice || 0);
+          const costPrice = deriveUnitPriceFromBase(baseCostPrice, unitConfig, unit);
+
+          return {
+            tempId: crypto.randomUUID(),
+            productId: matchedProduct.id,
+            name: item.name,
+            price,
+            basePrice: normalizeUnitPriceToBase(price, unitConfig, unit),
+            costPrice,
+            baseCostPrice,
+            quantity,
+            unit,
+            primaryUnit: getPrimaryUnit(unitConfig),
+            secondaryUnit: hasSecondaryUnit(unitConfig) ? (matchedProduct.secondaryUnit as UnitOption) : null,
+            unitConversion: matchedProduct.unitConversion ?? null,
+          };
+        }
+
+        return {
+          tempId: crypto.randomUUID(),
+          productId: item.productId ?? undefined,
+          name: item.name,
+          price,
+          basePrice: price,
+          costPrice: Math.max(0, Number(item.costPrice || 0)),
+          baseCostPrice: Math.max(0, Number(item.costPrice || 0)),
+          quantity,
+          unit,
+          primaryUnit: unit,
+          secondaryUnit: null,
+          unitConversion: null,
+        };
+      });
+
+      setCart((prev) => mergeCartItems(prev, itemsToAdd));
+      toast({
+        title: "Previous bill added",
+        description: `${itemsToAdd.length} item${itemsToAdd.length === 1 ? "" : "s"} copied into this bill.`,
+      });
+    } catch (error) {
+      toast({
+        title: "Could not load previous bill",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoadingPreviousBill(false);
+    }
+  };
+
+  const addBulkItemsToCart = () => {
+    const lines = bulkAddText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      toast({ title: "Nothing to add", description: "Paste one item per line.", variant: "destructive" });
+      return;
+    }
+
+    const itemsToAdd: CartItem[] = [];
+    let matchedProducts = 0;
+    let customItems = 0;
+    let selectedCustomerName: string | null = null;
+
+    for (const line of lines) {
+      const parsed = parseBulkItemLine(line);
+
+      if (!parsed) {
+        const customer = findCustomerByVoice(line);
+        if (customer) {
+          setSelectedCustomer(customer.id);
+          selectedCustomerName = customer.name;
+        } else {
+          itemsToAdd.push({
+            tempId: crypto.randomUUID(),
+            name: line,
+            price: 0,
+            basePrice: 0,
+            costPrice: 0,
+            baseCostPrice: 0,
+            quantity: 1,
+            unit: "PCS",
+            primaryUnit: "PCS",
+            secondaryUnit: null,
+            unitConversion: null,
+          });
+          customItems += 1;
+        }
+        continue;
+      }
+
+      const product = findProductByVoice(parsed.name);
+
+      if (product) {
+        itemsToAdd.push(createCartItemFromProduct(product, parsed.quantity, parsed.unit));
+        matchedProducts += 1;
+        continue;
+      }
+
+      const unit = parsed.unit ?? "PCS";
+      itemsToAdd.push({
+        tempId: crypto.randomUUID(),
+        name: parsed.name,
+        price: 0,
+        basePrice: 0,
+        costPrice: 0,
+        baseCostPrice: 0,
+        quantity: parsed.quantity,
+        unit,
+        primaryUnit: unit,
+        secondaryUnit: null,
+        unitConversion: null,
+      });
+      customItems += 1;
+    }
+
+    if (itemsToAdd.length === 0) {
+      toast({
+        title: "No items found",
+        description: "Paste item, quantity, and unit.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setCart((prev) => mergeCartItems(prev, itemsToAdd));
+    setSearchTerm("");
+    setBulkAddText("");
+    setIsBulkAddOpen(false);
+
+    const descriptionParts = [
+      `${itemsToAdd.length} item${itemsToAdd.length === 1 ? "" : "s"} added`,
+      matchedProducts > 0 ? `${matchedProducts} matched product${matchedProducts === 1 ? "" : "s"}` : null,
+      customItems > 0 ? `${customItems} custom row${customItems === 1 ? "" : "s"} need selling and cost price` : null,
+      selectedCustomerName ? `customer set to ${selectedCustomerName}` : null,
+    ].filter(Boolean);
+
+    toast({
+      title: "Bulk items added",
+      description: descriptionParts.join(". "),
+    });
   };
 
   const billingVoiceCommands = useMemo(
@@ -1168,6 +1620,26 @@ export default function Pos() {
     return products.filter(p => p.name.toLowerCase().includes(lower));
   }, [products, searchTerm]);
 
+  const cartStockUsageByProductId = useMemo(() => {
+    const usage = new Map<number, number>();
+
+    for (const item of cart) {
+      if (!item.productId) continue;
+      const usedQuantity = toBaseQuantity(
+        item.quantity,
+        {
+          primaryUnit: item.primaryUnit,
+          secondaryUnit: item.secondaryUnit,
+          unitConversion: item.unitConversion,
+        },
+        item.unit,
+      );
+      usage.set(item.productId, (usage.get(item.productId) ?? 0) + usedQuantity);
+    }
+
+    return usage;
+  }, [cart]);
+
   const openProductPriceDialog = async (product: any) => {
     const unitConfig = {
       primaryUnit: product.primaryUnit,
@@ -1188,9 +1660,7 @@ export default function Pos() {
         : defaultUnit;
     const rememberedPrice = rememberedItem?.price ?? defaultPrice;
     const rememberedQuantity = rememberedItem?.quantity ?? 1;
-    const rememberedCostPrice = rememberedItem
-      ? normalizeUnitPriceToBase(rememberedItem.costPrice, unitConfig, rememberedUnit)
-      : baseCostPrice;
+    const rememberedCostPrice = baseCostPrice;
 
     if (rememberedPrice > 0) {
       setCart(prev => {
@@ -1289,7 +1759,7 @@ export default function Pos() {
     const trimmedName = customItem.name.trim();
     const price = Number(customItem.price);
     const costPrice = Number(customItem.costPrice);
-    const quantity = Number(customItem.quantity || 1);
+    const quantity = normalizeQuantityInputForUnit(customItem.quantity || 1, customItem.unit);
 
     if (!trimmedName) {
       toast({ title: "Item name required", description: "Enter a custom item name.", variant: "destructive" });
@@ -1323,11 +1793,12 @@ export default function Pos() {
         secondaryUnit: null,
         unitConversion: null,
       }]);
-      setCustomItem({ name: "", price: "", costPrice: "", quantity: "1", unit: "PCS", addToProducts: false });
+      setCustomItem(createEmptyCustomItem());
+      setAddCustomItemToProducts(false);
       setIsCustomItemOpen(false);
     };
 
-    if (customItem.addToProducts) {
+    if (addCustomItemToProducts) {
       createProduct(
         {
           name: trimmedName,
@@ -1369,14 +1840,40 @@ export default function Pos() {
     }));
   };
 
-  const setQuantity = (tempId: string, quantity: number) => {
+  const setQuantity = (tempId: string, quantity: number | string) => {
     setCart(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        const newQty = Math.max(1, quantity);
+        const newQty = Math.max(1, normalizeQuantityInputForUnit(quantity, item.unit));
         return { ...item, quantity: newQty };
       }
       return item;
     }));
+  };
+
+  const setGramQuantityDraft = (tempId: string, value: string) => {
+    setGramQuantityDrafts((current) => ({ ...current, [tempId]: value }));
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue) || numericValue <= 0 || value.endsWith(".")) return;
+    setQuantity(tempId, value);
+  };
+
+  const clearGramQuantityDraft = (tempId: string) => {
+    setGramQuantityDrafts((current) => {
+      const next = { ...current };
+      delete next[tempId];
+      return next;
+    });
+  };
+
+  const commitGramQuantityDraft = (tempId: string) => {
+    const draft = gramQuantityDrafts[tempId];
+    if (draft === undefined || draft.trim() === "") {
+      clearGramQuantityDraft(tempId);
+      return;
+    }
+
+    setQuantity(tempId, draft);
+    clearGramQuantityDraft(tempId);
   };
 
   const openGramQuantityPicker = (tempId: string) => {
@@ -1388,12 +1885,31 @@ export default function Pos() {
   const applyGramQuantity = (quantity: number) => {
     if (!gramQuantityPickerItemId) return;
     setQuantity(gramQuantityPickerItemId, quantity);
-    setGramQuantityPickerItemId(null);
+    clearGramQuantityDraft(gramQuantityPickerItemId);
   };
 
   const applyCustomGramQuantity = (quantity: number) => {
     setCustomItem((current) => ({ ...current, quantity: quantity.toString() }));
-    setIsCustomGramPickerOpen(false);
+  };
+
+  const setCustomItemQuantity = (value: string) => {
+    if (customItem.unit === "GRAMS") {
+      setCustomItem((current) => ({ ...current, quantity: value }));
+      return;
+    }
+
+    setCustomItem((current) => ({
+      ...current,
+      quantity: value,
+    }));
+  };
+
+  const commitCustomGramQuantity = () => {
+    if (customItem.unit !== "GRAMS") return;
+    setCustomItem((current) => ({
+      ...current,
+      quantity: String(normalizeQuantityInputForUnit(current.quantity, "GRAMS")),
+    }));
   };
 
   const setSellingPrice = (tempId: string, price: number) => {
@@ -1412,6 +1928,32 @@ export default function Pos() {
       }
       return item;
     }));
+  };
+
+  const setCostPrice = (tempId: string, costPrice: number) => {
+    setCart((prev) =>
+      prev.map((item) => {
+        if (item.tempId !== tempId) return item;
+        const nextCostPrice = Math.max(0, costPrice);
+        return {
+          ...item,
+          costPrice: nextCostPrice,
+          baseCostPrice: normalizeUnitPriceToBase(
+            nextCostPrice,
+            {
+              primaryUnit: item.primaryUnit,
+              secondaryUnit: item.secondaryUnit,
+              unitConversion: item.unitConversion,
+            },
+            item.unit,
+          ),
+        };
+      }),
+    );
+  };
+
+  const setCustomCartItemName = (tempId: string, name: string) => {
+    setCart((prev) => prev.map((item) => (item.tempId === tempId ? { ...item, name } : item)));
   };
 
   const setUnit = (tempId: string, unit: UnitOption) => {
@@ -1531,7 +2073,7 @@ export default function Pos() {
       toast({ title: "Empty Cart", description: "Add items before checkout", variant: "destructive" });
       return;
     }
-    setPaidAmount(grandTotal.toString());
+    setPaidAmount("");
     setIsPaymentOpen(true);
   };
 
@@ -1549,7 +2091,7 @@ export default function Pos() {
     const appliedOldBalance = Math.max(0, Number(appliedCustomer?.balance || 0));
     const appliedCartTotal = billCart.reduce((sum, item) => sum + item.price * item.quantity, 0);
     const appliedGrandTotal = appliedCartTotal + extraChargesTotal + appliedOldBalance;
-    const appliedPayment = Math.min(payment, appliedGrandTotal);
+    const appliedPayment = payment;
   
       createBill({
         customerId: billCustomerId,
@@ -1618,7 +2160,7 @@ export default function Pos() {
             <Button variant="outline" size="icon" className="shrink-0 h-9 w-9" title="New Customer">
               <UserPlus className="w-4 h-4" />
             </Button>
-            <Popover>
+            <Popover open={isBillDatePickerOpen} onOpenChange={setIsBillDatePickerOpen}>
               <PopoverTrigger asChild>
                 <Button
                   type="button"
@@ -1641,6 +2183,7 @@ export default function Pos() {
                     if (!date) return;
                     setBillDate(date);
                     setBillDateManuallyChanged(true);
+                    setIsBillDatePickerOpen(false);
                   }}
                   initialFocus
                 />
@@ -1663,22 +2206,50 @@ export default function Pos() {
               <p className="text-sm">Select products to add</p>
             </div>
           ) : (
-            [...cart].reverse().map((item) => (
+            [...cart].reverse().map((item, index) => (
               <div key={item.tempId} className="bg-card p-2.5 rounded-xl border border-border shadow-sm flex items-center justify-between group animate-in slide-in-from-left-2 duration-300">
+                <div className="mr-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-sm font-bold text-primary">
+                  {cart.length - index}
+                </div>
                 <div className="flex-1">
-                  <h4 className="font-medium line-clamp-1">{item.name}</h4>
+                  {item.productId ? (
+                    <h4 className="font-medium line-clamp-1">{item.name}</h4>
+                  ) : (
+                    <Input
+                      value={item.name}
+                      onChange={(e) => setCustomCartItemName(item.tempId, e.target.value)}
+                      className="h-8 max-w-sm bg-background font-medium"
+                      placeholder="Custom item name"
+                    />
+                  )}
                   <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                     <span>Selling Price</span>
                     <Input
                       type="number"
                       min="0"
-                      step="0.01"
+                      step="1"
                       value={item.price}
                       onChange={(e) => setSellingPrice(item.tempId, Number(e.target.value) || 0)}
                       className="h-8 w-28 font-mono"
                       onFocus={(e) => e.target.select()}
                     />
                     <span>/ {item.unit}</span>
+                    {!item.productId && (
+                      <>
+                        <span className="text-muted-foreground/60">|</span>
+                        <span>Cost Price</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={item.costPrice}
+                          onChange={(e) => setCostPrice(item.tempId, Number(e.target.value) || 0)}
+                          className="h-8 w-28 font-mono"
+                          onFocus={(e) => e.target.select()}
+                        />
+                        <span>/ {item.unit}</span>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2.5">
@@ -1699,14 +2270,30 @@ export default function Pos() {
                           <div>
                             <Input
                               type="number"
-                              min="1"
-                              value={item.quantity}
-                              onChange={(e) => setQuantity(item.tempId, Number(e.target.value) || 1)}
+                              min={item.unit === "GRAMS" ? "0" : "1"}
+                              step="1"
+                              value={item.unit === "GRAMS" ? gramQuantityDrafts[item.tempId] ?? item.quantity : item.quantity}
+                              onChange={(e) =>
+                                item.unit === "GRAMS"
+                                  ? setGramQuantityDraft(item.tempId, e.target.value)
+                                  : setQuantity(item.tempId, e.target.value)
+                              }
                               className="w-12 h-8 text-center text-sm font-medium border-0 focus-visible:ring-0 p-0"
                               onFocus={(e) => {
                                 e.target.select();
                                 if (item.unit === "GRAMS") {
                                   openGramQuantityPicker(item.tempId);
+                                }
+                              }}
+                              onBlur={() => {
+                                if (item.unit === "GRAMS") {
+                                  commitGramQuantityDraft(item.tempId);
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (item.unit === "GRAMS" && e.key === "Enter") {
+                                  e.preventDefault();
+                                  commitGramQuantityDraft(item.tempId);
                                 }
                               }}
                             />
@@ -1723,6 +2310,7 @@ export default function Pos() {
                                   variant="outline"
                                   size="sm"
                                   className="h-8"
+                                  onMouseDown={(e) => e.preventDefault()}
                                   onClick={() => applyGramQuantity(quantity)}
                                 >
                                   {quantity}g
@@ -1742,7 +2330,11 @@ export default function Pos() {
                       value={item.unit}
                       onChange={(e) => setUnit(item.tempId, e.target.value as UnitOption)}
                     >
-                      {[item.primaryUnit, ...(item.secondaryUnit ? [item.secondaryUnit] : [])].map((unit) => (
+                      {getAvailableUnits({
+                        primaryUnit: item.primaryUnit,
+                        secondaryUnit: item.secondaryUnit,
+                        unitConversion: item.unitConversion,
+                      }).map((unit) => (
                         <option key={unit} value={unit}>
                           {unit}
                         </option>
@@ -1786,11 +2378,16 @@ export default function Pos() {
                 <div className="text-xs text-muted-foreground">
                   This Bill Total: <span className="font-semibold text-foreground">{formatCurrencyINR(cartTotal)}</span>
                 </div>
-                <CollapsibleTrigger asChild>
-                  <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-primary">
-                    <Plus className="w-4 h-4 mr-1" /> {chargesOpen ? "Hide Charges" : "Extra Charges"}
+                <div className="flex items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" className="h-8 px-2" onClick={applyRoundOff}>
+                    Round Off
                   </Button>
-                </CollapsibleTrigger>
+                  <CollapsibleTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-primary">
+                      <Plus className="w-4 h-4 mr-1" /> {chargesOpen ? "Hide Charges" : "Extra Charges"}
+                    </Button>
+                  </CollapsibleTrigger>
+                </div>
               </div>
 
               <CollapsibleContent className="space-y-2 pt-1">
@@ -1827,14 +2424,11 @@ export default function Pos() {
                   <Button type="button" variant="ghost" size="sm" className="h-8 px-0 text-primary" onClick={addExtraChargeRow}>
                     <Plus className="w-4 h-4 mr-2" /> Add Extra Charge
                   </Button>
-                  <Button type="button" variant="ghost" size="sm" className="h-8 px-0 text-primary" onClick={applyRoundOff}>
-                    Round Off
-                  </Button>
                 </div>
               </CollapsibleContent>
             </Collapsible>
           </div>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <Button
               type="button"
               variant="outline"
@@ -1844,7 +2438,59 @@ export default function Pos() {
             >
               Cancel
             </Button>
-             <Dialog open={isCustomItemOpen} onOpenChange={setIsCustomItemOpen}>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 text-sm"
+              onClick={addPreviousBillItemsToCart}
+              disabled={!selectedCustomer || isLoadingPreviousBill}
+              title={!selectedCustomer ? "Select a customer first" : "Copy items from this customer's previous bill"}
+            >
+              <History className="w-4 h-4 mr-2" />
+              {isLoadingPreviousBill ? "Loading..." : "Previous"}
+            </Button>
+            <Dialog open={isBulkAddOpen} onOpenChange={setIsBulkAddOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline" className="h-10 text-sm">
+                  <ClipboardList className="w-4 h-4 mr-2" /> Bulk Add
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-lg">
+                <DialogHeader>
+                  <DialogTitle>Add Items in Bulk</DialogTitle>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                  <div className="text-sm text-muted-foreground">
+                    Paste one item per line. You can include a customer line, then items like "Besan 5 kgs" or "Zeera 250 grms".
+                  </div>
+                  <Textarea
+                    value={bulkAddText}
+                    onChange={(e) => setBulkAddText(e.target.value)}
+                    placeholder={"99 Kirana\nBesan 5 kgs\nSujji rava 6 kgs\nZeera 250 grms"}
+                    className="min-h-[220px] font-mono text-sm"
+                    autoFocus
+                  />
+                  <div className="rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+                    Matched products use saved product prices. Unmatched lines are added as custom rows with selling price 0 and cost price 0 so you can edit both before saving.
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={() => setIsBulkAddOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button type="button" onClick={addBulkItemsToCart}>
+                    Add Items
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+             <Dialog
+               open={isCustomItemOpen}
+               onOpenChange={(open) => {
+                 setIsCustomItemOpen(open);
+                 setAddCustomItemToProducts(false);
+               }}
+             >
              <DialogTrigger asChild>
                 <Button variant="outline" className="h-10 text-sm">
                   <Plus className="w-4 h-4 mr-2" /> Custom Item
@@ -1905,11 +2551,18 @@ export default function Pos() {
                               type="number" 
                               placeholder="Qty" 
                               value={customItem.quantity} 
-                              onChange={e => setCustomItem({...customItem, quantity: e.target.value})}
+                              onChange={(e) => setCustomItemQuantity(e.target.value)}
                               onFocus={(e) => {
                                 e.target.select();
                                 if (customItem.unit === "GRAMS") {
                                   setIsCustomGramPickerOpen(true);
+                                }
+                              }}
+                              onBlur={commitCustomGramQuantity}
+                              onKeyDown={(e) => {
+                                if (customItem.unit === "GRAMS" && e.key === "Enter") {
+                                  e.preventDefault();
+                                  commitCustomGramQuantity();
                                 }
                               }}
                             />
@@ -1926,6 +2579,7 @@ export default function Pos() {
                                   variant="outline"
                                   size="sm"
                                   className="h-8"
+                                  onMouseDown={(e) => e.preventDefault()}
                                   onClick={() => applyCustomGramQuantity(quantity)}
                                 >
                                   {quantity}g
@@ -1939,8 +2593,8 @@ export default function Pos() {
                     <label className="flex items-center gap-2 text-sm">
                       <input
                         type="checkbox"
-                        checked={customItem.addToProducts}
-                        onChange={(e) => setCustomItem({ ...customItem, addToProducts: e.target.checked })}
+                        checked={addCustomItemToProducts}
+                        onChange={(e) => setAddCustomItemToProducts(e.target.checked)}
                       />
                       Add this custom item to products also
                     </label>
@@ -1994,15 +2648,34 @@ export default function Pos() {
                     secondaryUnit: product.secondaryUnit,
                     unitConversion: product.unitConversion,
                   };
-                  const defaultUnit = getDefaultSalesUnit(unitConfig);
-                  return (
-                    <>
-                      <div className="font-medium text-sm line-clamp-2 mb-1 group-hover:text-primary transition-colors">{product.name}</div>
-                      <div className="mt-auto font-mono text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-md">
-                        {formatCurrencyINR(deriveUnitPriceFromBase(Number(product.price || 0), unitConfig, defaultUnit))} / {defaultUnit}
-                      </div>
-                    </>
-                  );
+                  const baseUnit = getBaseUnit(unitConfig);
+                  const primaryUnit = getPrimaryUnit(unitConfig);
+                    const isWeightDisplayInKg =
+                      baseUnit === "GRAMS" || (!hasSecondaryUnit(unitConfig) && primaryUnit === "GRAMS");
+                    const defaultUnit = isWeightDisplayInKg ? "KG" : getDefaultSalesUnit(unitConfig);
+                    const displayPrice = isWeightDisplayInKg
+                      ? Number(product.price || 0) * 1000
+                      : deriveUnitPriceFromBase(Number(product.price || 0), unitConfig, defaultUnit);
+                    const remainingStock = Math.max(
+                      0,
+                      Number(product.stock || 0) - (cartStockUsageByProductId.get(product.id) ?? 0),
+                    );
+                    const stockLabel = formatStockAvailability(
+                      remainingStock,
+                      isWeightDisplayInKg ? "KG" : baseUnit,
+                      baseUnit,
+                    );
+                    return (
+                      <>
+                        <div className="font-medium text-sm line-clamp-2 mb-1 group-hover:text-primary transition-colors">{product.name}</div>
+                        <div className="mt-auto font-mono text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-md">
+                          <div className="flex items-baseline gap-1.5">
+                            <span>{formatCurrencyINR(displayPrice)} / {defaultUnit}</span>
+                            <span className="text-[10px] font-medium text-primary/70">Stock {stockLabel}</span>
+                          </div>
+                        </div>
+                      </>
+                    );
                 })()}
               </button>
             ))}
@@ -2039,7 +2712,7 @@ export default function Pos() {
                   <Input
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     value={pendingProduct.price}
                     onChange={(e) =>
                       setPendingProduct((current) =>
@@ -2056,7 +2729,7 @@ export default function Pos() {
                   <Input
                     type="number"
                     min="1"
-                    step="0.01"
+                    step="1"
                     value={pendingProduct.quantity}
                     onChange={(e) =>
                       setPendingProduct((current) =>
@@ -2150,12 +2823,18 @@ export default function Pos() {
                   <IndianRupee className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
                   <Input 
                     type="number" 
+                    step="0.01"
+                    min="0"
                     className="pl-10 h-12 text-lg font-mono"
                     value={paidAmount}
+                    placeholder="0 if not received"
                     onChange={(e) => setPaidAmount(e.target.value)}
                     onFocus={(e) => e.target.select()}
                   />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Leave this blank if no money was received. Only the amount entered here will be recorded as received.
+                </p>
                 <div className="flex justify-between text-sm px-1">
                   <span className="text-muted-foreground">Change to return:</span>
                   <span className={cn(
@@ -2191,7 +2870,7 @@ export default function Pos() {
               )}
               <div className="space-y-2">
                 <label className="text-sm font-medium">Bill Date (Optional)</label>
-                <Popover>
+                <Popover open={isPaymentBillDatePickerOpen} onOpenChange={setIsPaymentBillDatePickerOpen}>
                   <PopoverTrigger asChild>
                     <Button
                       type="button"
@@ -2213,6 +2892,7 @@ export default function Pos() {
                         if (!date) return;
                         setBillDate(date);
                         setBillDateManuallyChanged(true);
+                        setIsPaymentBillDatePickerOpen(false);
                       }}
                       initialFocus
                     />

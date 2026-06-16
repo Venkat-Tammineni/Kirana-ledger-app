@@ -33,9 +33,19 @@ test("products.create input contract accepts number and string price", () => {
   assert.equal(stringInput.success, true);
 });
 
+test("products.update input contract accepts numeric stock fields", () => {
+  const ok = api.products.update.input.safeParse({
+    price: 130,
+    costPrice: 103,
+    stock: 150,
+    lowStockThreshold: 50,
+  });
+  assert.equal(ok.success, true);
+});
+
 test("bills.create input contract", () => {
   const ok = api.bills.create.input.safeParse({
-    items: [{ name: "Rice", quantity: 2, price: 60, costPrice: 45 }],
+    items: [{ name: "Rice", quantity: 2, baseQuantity: 1.5, price: 60, costPrice: 45 }],
     extraCharges: [{ label: "Transport", amount: 25 }],
     paidAmount: 100,
   });
@@ -51,7 +61,7 @@ test("bills.create input contract", () => {
 test("bills.update input contract", () => {
   const ok = api.bills.update.input.safeParse({
     customerId: 4,
-    items: [{ productId: 2, name: "Rice", quantity: 3, price: 62, costPrice: 45 }],
+    items: [{ productId: 2, name: "Rice", quantity: 3, baseQuantity: 2.5, price: 62, costPrice: 45 }],
     extraCharges: [{ label: "Transport", amount: 40 }],
     editedBy: "Venkat",
     paidAmount: 150,
@@ -69,7 +79,7 @@ test("bills.update input contract", () => {
 test("quotations.create input contract", () => {
   const ok = api.quotations.create.input.safeParse({
     customerId: 2,
-    items: [{ productId: 1, name: "Rice", quantity: 2, price: 60, costPrice: 45 }],
+    items: [{ productId: 1, name: "Rice", quantity: 2, baseQuantity: 1.25, price: 60, costPrice: 45 }],
     extraCharges: [{ label: "Transport", amount: 30 }],
     notes: "Valid for 7 days",
     editedBy: "Venkat",
@@ -85,7 +95,7 @@ test("quotations.create input contract", () => {
 
 test("quotations.update input contract", () => {
   const ok = api.quotations.update.input.safeParse({
-    items: [{ name: "Oil", quantity: 1, price: 120 }],
+    items: [{ name: "Oil", quantity: 1, baseQuantity: 0.5, price: 120 }],
     notes: "Updated quote",
   });
   assert.equal(ok.success, true);

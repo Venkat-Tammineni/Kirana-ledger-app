@@ -7,9 +7,9 @@ import { z } from "zod";
 import { db } from "./db";
 import { getCustomerStatement } from "./services/billing-service";
 import { bulkAdjustStock, recurringPurchase } from "./services/inventory-service";
-import { registerAdvancedReportRoutes } from "./routes/advanced-reports";
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { bills, billItems, customers } from "@shared/schema";
+import { formatBillLabel } from "@shared/billing";
 import { formatIST, getISTDayBounds, parseISTDateOnly, parseISTDateTime } from "@shared/timezone";
 
 function parseDateOnlyInput(value?: string) {
@@ -112,6 +112,51 @@ export async function registerRoutes(
     }
   });
 
+  app.patch(api.staff.updateSalary.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const input = api.staff.updateSalary.input.parse(req.body);
+      const result = await storage.updateStaffSalary(id, {
+        salaryType: input.salaryType,
+        salaryAmount: input.salaryAmount,
+        applyToRange: input.applyToRange,
+        rangeStart: input.rangeStart ? parseDateOnlyInput(input.rangeStart) : undefined,
+        rangeEnd: input.rangeEnd ? parseDateOnlyInput(input.rangeEnd) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else if (err instanceof Error) {
+        res.status(400).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.post(api.staff.updateSalaryPayment.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const input = api.staff.updateSalaryPayment.input.parse(req.body);
+      const result = await storage.upsertStaffSalaryPayment(id, {
+        rangeStart: parseDateOnlyInput(input.rangeStart) || parseISTDateTime(input.rangeStart),
+        rangeEnd: parseDateOnlyInput(input.rangeEnd) || parseISTDateTime(input.rangeEnd),
+        amount: input.amount,
+        note: input.note,
+      });
+      res.json(result);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else if (err instanceof Error) {
+        res.status(400).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
   // === Accounts ===
   app.get(api.accounts.list.path, async (_req, res) => {
     const accounts = await storage.getAccounts();
@@ -151,7 +196,13 @@ export async function registerRoutes(
     try {
       const id = Number(req.params.id);
       const input = api.accounts.spend.input.parse(req.body);
-      const txn = await storage.spendFromAccount(id, input.amount, input.note);
+      const txn = await storage.spendFromAccount(
+        id,
+        input.amount,
+        input.note,
+        input.date ? parseISTDateTime(input.date) : undefined,
+        input.purchases,
+      );
       res.status(201).json(txn);
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -207,6 +258,22 @@ export async function registerRoutes(
     }
   });
 
+  app.delete(api.accounts.deleteInvestment.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      await storage.deleteInvestmentEntry(id);
+      res.status(204).send();
+    } catch (err) {
+      if (err instanceof Error && err.message === "Investment entry not found") {
+        res.status(404).json({ message: err.message });
+      } else if (err instanceof Error) {
+        res.status(400).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
   app.delete(api.accounts.deleteSafe.path, async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -251,7 +318,9 @@ export async function registerRoutes(
       if (!customer) return res.status(404).json({ message: "Customer not found" });
       
       const profitDate = req.query.profitDate ? parseDateOnlyInput(String(req.query.profitDate)) : undefined;
-      const stats = await storage.getCustomerStats(id, profitDate);
+      const startDate = req.query.startDate ? parseDateOnlyInput(String(req.query.startDate)) : undefined;
+      const endDate = req.query.endDate ? parseDateOnlyInput(String(req.query.endDate)) : undefined;
+      const stats = await storage.getCustomerStats(id, profitDate, startDate, endDate);
       const history = await storage.getCustomerHistory(id);
       const ledger = await storage.getCustomerLedger(id);
       
@@ -306,9 +375,15 @@ export async function registerRoutes(
 
   app.post(api.customers.repay.path, async (req, res) => {
     try {
+      const id = Number(req.params.id);
+      const customer = await storage.getCustomer(id);
+      if (!customer) return res.status(404).json({ message: "Customer not found" });
       const input = api.customers.repay.input.parse(req.body);
+      if (input.customerId !== id) {
+        return res.status(400).json({ message: "Customer mismatch. Please refresh and try again." });
+      }
       const payment = await storage.createPayment({
-        customerId: input.customerId,
+        customerId: id,
         amount: input.amount.toString(),
         note: input.note || "Manual repayment",
         billId: null,
@@ -392,7 +467,7 @@ export async function registerRoutes(
       ["Type", "Reference", "Date", "Amount"],
       ...statement.bills.map((bill) => [
         "Bill",
-        `#${bill.id}`,
+        formatBillLabel(bill),
         bill.date ? formatIST(bill.date, "dd MMM yyyy, hh:mm a") : "",
         Number(bill.totalAmount || 0).toFixed(2),
       ]),
@@ -432,8 +507,8 @@ export async function registerRoutes(
         unitConversion: input.secondaryUnit ? (input.unitConversion ?? null) : null,
         sku: input.sku ?? null,
         isActive: input.isActive ?? true,
-        stock: input.stock ?? 0,
-        lowStockThreshold: input.lowStockThreshold ?? 10,
+        stock: String(input.stock ?? 0),
+        lowStockThreshold: String(input.lowStockThreshold ?? 10),
       };
 
       const product = await storage.createProduct(normalized);
@@ -474,8 +549,8 @@ export async function registerRoutes(
         ...(input.unitConversion !== undefined ? { unitConversion: input.secondaryUnit ? (input.unitConversion ?? null) : null } : {}),
         ...(input.isActive !== undefined ? { isActive: input.isActive ?? true } : {}),
         ...(input.sku !== undefined ? { sku: input.sku ?? null } : {}),
-        ...(input.stock !== undefined ? { stock: input.stock ?? 0 } : {}),
-        ...(input.lowStockThreshold !== undefined ? { lowStockThreshold: input.lowStockThreshold ?? 10 } : {}),
+        ...(input.stock !== undefined ? { stock: String(input.stock ?? 0) } : {}),
+        ...(input.lowStockThreshold !== undefined ? { lowStockThreshold: String(input.lowStockThreshold ?? 10) } : {}),
       };
       const product = await storage.updateProduct(id, normalized);
       res.json(product);
@@ -559,6 +634,26 @@ export async function registerRoutes(
     }
   });
 
+  app.patch(api.accounts.updateTransaction.path, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const transactionId = Number(req.params.transactionId);
+      const input = api.accounts.updateTransaction.input.parse(req.body);
+      const txn = await storage.updateAccountTransaction(id, transactionId, input);
+      res.json(txn);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else if (err instanceof Error) {
+        const status =
+          err.message === "Account not found" || err.message === "Transaction not found" ? 404 : 400;
+        res.status(status).json({ message: err.message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
   app.delete(api.products.delete.path, async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -592,6 +687,22 @@ export async function registerRoutes(
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
       } else {
+      res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
+  app.get(api.bills.previous.path, async (req, res) => {
+    try {
+      const input = api.bills.previous.input.parse(req.query);
+      const bill = await storage.getPreviousBillForCustomer(input.customerId);
+      res.json(bill ?? null);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else if (err instanceof Error) {
+        res.status(400).json({ message: err.message });
+      } else {
         res.status(500).json({ message: "Internal server error" });
       }
     }
@@ -612,6 +723,9 @@ export async function registerRoutes(
       if (err instanceof z.ZodError) {
         console.error(err);
         res.status(400).json({ message: "Validation error: " + err.errors.map(e => e.path.join('.') + " " + e.message).join(', ') });
+      } else if (err instanceof Error) {
+        console.error(err);
+        res.status(500).json({ message: err.message || "Failed to create bill" });
       } else {
         console.error(err);
         res.status(500).json({ message: "Internal server error" });
@@ -847,6 +961,90 @@ export async function registerRoutes(
     }
   });
 
+  app.get(api.reporting.itemBills.path, async (req, res) => {
+    try {
+      const input = api.reporting.itemBills.input.parse(req.query);
+      const { start: startDate } = getISTDayBounds(input.startDate);
+      const { end: endDate } = getISTDayBounds(input.endDate);
+      const itemSearch = `%${input.search.toLowerCase()}%`;
+      const billNumberSearch = `%${input.search}%`;
+
+      const rows = await db
+        .select({
+          bill: bills,
+          customerName: customers.name,
+          itemName: billItems.name,
+          quantity: billItems.quantity,
+          unit: billItems.unit,
+          price: billItems.price,
+          subtotal: billItems.subtotal,
+        })
+        .from(bills)
+        .leftJoin(customers, eq(bills.customerId, customers.id))
+        .innerJoin(billItems, eq(bills.id, billItems.billId))
+        .where(
+          and(
+            eq(bills.status, "completed"),
+            gte(bills.date, startDate),
+            lte(bills.date, endDate),
+            sql`(
+              lower(${billItems.name}) like ${itemSearch}
+              or lower(coalesce(${customers.name}, 'walk-in customer')) like ${itemSearch}
+              or ${bills.id}::text like ${billNumberSearch}
+            )`,
+          ),
+        )
+        .orderBy(desc(bills.date), desc(bills.id));
+
+      const resultsByBill = new Map<number, {
+        id: number;
+        customerName: string | null;
+        date: Date | null;
+        status: string | null;
+        totalAmount: string | number;
+        totalProfit: string | number | null;
+        matchedItems: Array<{
+          name: string;
+          quantity: number;
+          unit: string | null;
+          price: string | number;
+          subtotal: string | number;
+        }>;
+      }>();
+
+      for (const row of rows) {
+        const existing = resultsByBill.get(row.bill.id);
+        const billResult = existing ?? {
+          id: row.bill.id,
+          customerName: row.customerName,
+          date: row.bill.date ?? null,
+          status: row.bill.status ?? null,
+          totalAmount: row.bill.totalAmount,
+          totalProfit: row.bill.totalProfit,
+          matchedItems: [],
+        };
+
+        billResult.matchedItems.push({
+          name: row.itemName,
+          quantity: row.quantity,
+          unit: row.unit,
+          price: row.price,
+          subtotal: row.subtotal,
+        });
+
+        if (!existing) resultsByBill.set(row.bill.id, billResult);
+      }
+
+      res.json(Array.from(resultsByBill.values()));
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else {
+        res.status(500).json({ message: "Internal server error" });
+      }
+    }
+  });
+
   app.get(api.exports.salesCsv.path, async (req, res) => {
     try {
       const startDate = req.query.startDate ? getISTDayBounds(String(req.query.startDate)).start : undefined;
@@ -875,7 +1073,7 @@ export async function registerRoutes(
         .orderBy(desc(bills.date));
 
       const csvRows = [
-        ["Bill ID", "Date", "Customer", "Item", "Qty", "Price", "Line Total", "Bill Total", "Bill Profit"],
+        ["Bill Number", "Date", "Customer", "Item", "Qty", "Price", "Line Total", "Bill Total", "Bill Profit"],
         ...rows.map((row) => [
           row.billId,
           row.billDate ? formatIST(row.billDate, "dd MMM yyyy, hh:mm a") : "",
@@ -900,8 +1098,6 @@ export async function registerRoutes(
       res.status(500).json({ message: "Internal server error" });
     }
   });
-
-  registerAdvancedReportRoutes(app);
 
   return httpServer;
 }

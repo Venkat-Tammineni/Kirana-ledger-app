@@ -8,10 +8,8 @@ import {
   Store,
   Warehouse,
   BarChart3,
-  Wrench,
   Landmark,
   UsersRound,
-  LineChart,
   ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -26,8 +24,6 @@ const NAV_ITEMS = [
   { label: "Staff", href: "/staff", icon: UsersRound },
   { label: "Inventory", href: "/inventory", icon: Warehouse },
   { label: "Reporting", href: "/reporting", icon: BarChart3 },
-  { label: "Advanced Reports", href: "/advanced-reports", icon: LineChart },
-  { label: "Ops Shortcuts", href: "/ops", icon: Wrench },
   { label: "Bills History", href: "/bills", icon: History },
 ];
 

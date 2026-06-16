@@ -134,6 +134,78 @@ export function useUpdateStaffOverallPayment() {
   });
 }
 
+export function useUpdateStaffSalary() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: {
+      staffId: number;
+      salaryType: "daily" | "monthly";
+      salaryAmount: number;
+      applyToRange?: boolean;
+      rangeStart?: string;
+      rangeEnd?: string;
+    }) => {
+      const url = buildUrl(api.staff.updateSalary.path, { id: data.staffId });
+      const res = await fetch(url, {
+        method: api.staff.updateSalary.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salaryType: data.salaryType,
+          salaryAmount: data.salaryAmount,
+          applyToRange: data.applyToRange,
+          rangeStart: data.rangeStart,
+          rangeEnd: data.rangeEnd,
+        }),
+      });
+      const contentType = res.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        throw new Error("Daily payment edit API is not loaded yet. Restart the app server and try again.");
+      }
+      if (!res.ok) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to update salary");
+      }
+      return api.staff.updateSalary.responses[200].parse(await res.json());
+    },
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: [api.staff.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.staff.get.path, variables.staffId] });
+    },
+  });
+}
+
+export function useUpdateStaffSalaryPayment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { staffId: number; rangeStart: string; rangeEnd: string; amount: number; note?: string }) => {
+      const url = buildUrl(api.staff.updateSalaryPayment.path, { id: data.staffId });
+      const res = await fetch(url, {
+        method: api.staff.updateSalaryPayment.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rangeStart: data.rangeStart,
+          rangeEnd: data.rangeEnd,
+          amount: data.amount,
+          note: data.note,
+        }),
+      });
+      const contentType = res.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        throw new Error("Salary payment API is not available yet. Restart the app server and try again.");
+      }
+      if (!res.ok) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to update salary payment");
+      }
+      return api.staff.updateSalaryPayment.responses[200].parse(await res.json());
+    },
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: [api.staff.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.staff.get.path, variables.staffId] });
+    },
+  });
+}
+
 // --- Accounts Hooks ---
 
 export function useAccounts() {
@@ -195,12 +267,18 @@ export function useInvestmentDetails() {
 export function useSpendFromAccount() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { id: number; amount: number; note: string }) => {
+    mutationFn: async (data: {
+      id: number;
+      amount: number;
+      note: string;
+      date?: string;
+      purchases?: Array<{ productId: number; quantity: number; costPrice?: number }>;
+    }) => {
       const url = buildUrl(api.accounts.spend.path, { id: data.id });
       const res = await fetch(url, {
         method: api.accounts.spend.method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: data.amount, note: data.note }),
+        body: JSON.stringify({ amount: data.amount, note: data.note, date: data.date, purchases: data.purchases }),
       });
       if (!res.ok) {
         const error = await res.json().catch(() => null);
@@ -212,6 +290,9 @@ export function useSpendFromAccount() {
       queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.accounts.get.path, vars.id] });
       queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
     },
   });
 }
@@ -270,6 +351,46 @@ export function useDeleteAccountTransaction() {
       queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.accounts.get.path, result.id] });
       queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
+      queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) && query.queryKey[0] === api.customers.get.path,
+      });
+      queryClient.invalidateQueries({ queryKey: [api.dashboard.stats.path] });
+    },
+  });
+}
+
+export function useUpdateAccountTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { id: number; transactionId: number; amount: number; note: string; customerId?: number | null }) => {
+      const url = buildUrl(api.accounts.updateTransaction.path, {
+        id: data.id,
+        transactionId: data.transactionId,
+      });
+      const res = await fetch(url, {
+        method: api.accounts.updateTransaction.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: data.amount, note: data.note, customerId: data.customerId }),
+      });
+      const contentType = res.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        throw new Error("Edit payment API is not loaded yet. Restart the app server and try again.");
+      }
+      if (!res.ok) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to update transaction");
+      }
+      return api.accounts.updateTransaction.responses[200].parse(await res.json());
+    },
+    onSuccess: (_txn, vars) => {
+      queryClient.invalidateQueries({ queryKey: [api.accounts.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.get.path, vars.id] });
+      queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
       queryClient.invalidateQueries({ queryKey: [api.customers.list.path] });
       queryClient.invalidateQueries({
         predicate: (query) =>
@@ -299,6 +420,29 @@ export function useAddInvestment() {
         throw new Error(error?.message || "Failed to add investment");
       }
       return api.accounts.addInvestment.responses[201].parse(await res.json());
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
+      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
+      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
+    },
+  });
+}
+
+export function useDeleteInvestment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) => {
+      const url = buildUrl(api.accounts.deleteInvestment.path, { id });
+      const res = await fetch(url, {
+        method: api.accounts.deleteInvestment.method,
+      });
+      if (!res.ok && res.status !== 204) {
+        const error = await res.json().catch(() => null);
+        throw new Error(error?.message || "Failed to delete investment");
+      }
+      return id;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [api.accounts.investment.path] });
@@ -369,14 +513,17 @@ export function useCustomers(search?: string) {
   });
 }
 
-export function useCustomer(id: number, profitDate?: string) {
+export function useCustomer(id: number, filters?: { profitDate?: string; startDate?: string; endDate?: string }) {
   return useQuery({
-    queryKey: [api.customers.get.path, id, profitDate],
+    queryKey: [api.customers.get.path, id, filters?.profitDate, filters?.startDate, filters?.endDate],
     queryFn: async () => {
       const url = buildUrl(api.customers.get.path, { id });
-      const res = await fetch(
-        profitDate ? `${url}?profitDate=${encodeURIComponent(profitDate)}` : url,
-      );
+      const params = new URLSearchParams();
+      if (filters?.profitDate) params.set("profitDate", filters.profitDate);
+      if (filters?.startDate) params.set("startDate", filters.startDate);
+      if (filters?.endDate) params.set("endDate", filters.endDate);
+      const query = params.toString();
+      const res = await fetch(query ? `${url}?${query}` : url);
       if (!res.ok) throw new Error("Failed to fetch customer");
       return api.customers.get.responses[200].parse(await res.json());
     },
@@ -603,6 +750,15 @@ export function useCreateProduct() {
       queryClient.invalidateQueries({
         predicate: (query) =>
           Array.isArray(query.queryKey) && query.queryKey[0] === api.products.list.path,
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          Array.isArray(query.queryKey) &&
+          (
+            query.queryKey[0] === api.inventory.lowStock.path ||
+            query.queryKey[0] === api.inventory.topSelling.path ||
+            query.queryKey[0] === api.inventory.leastSelling.path
+          ),
       });
     },
   });
@@ -843,6 +999,17 @@ export function useLastBilledItemMemory(query?: LastBilledItemMemoryQuery) {
   });
 }
 
+export async function fetchPreviousBill(customerId: number) {
+  const params = new URLSearchParams({ customerId: String(customerId) });
+  const res = await fetch(`${api.bills.previous.path}?${params.toString()}`);
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(error?.message || "Failed to fetch previous bill");
+  }
+
+  return api.bills.previous.responses[200].parse(await res.json());
+}
+
 export function useCreateBill() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -853,11 +1020,11 @@ export function useCreateBill() {
         body: JSON.stringify(data),
       });
       if (!res.ok) {
+        const error = await res.json().catch(() => null);
         if (res.status === 400) {
-          const error = await res.json();
-          throw new Error(error.message || "Validation failed");
+          throw new Error(error?.message || "Validation failed");
         }
-        throw new Error("Failed to create bill");
+        throw new Error(error?.message || "Failed to create bill");
       }
       return api.bills.create.responses[201].parse(await res.json());
     },
@@ -878,7 +1045,7 @@ export function useCreateBill() {
 export function useUpdateBill() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { id: number; bill: UpdateBillInput }) => {
+    mutationFn: async (data: { id: number; bill: UpdateBillInput; previousCustomerId?: number | null }) => {
       const url = buildUrl(api.bills.update.path, { id: data.id });
       const res = await fetch(url, {
         method: api.bills.update.method,
@@ -897,6 +1064,9 @@ export function useUpdateBill() {
     onSuccess: (_bill, variables) => {
       queryClient.invalidateQueries({ queryKey: [api.bills.list.path] });
       queryClient.invalidateQueries({ queryKey: [api.bills.get.path, variables.id] });
+      if (variables.previousCustomerId) {
+        invalidateCustomerQueries(queryClient, variables.previousCustomerId);
+      }
       if (variables.bill.customerId) {
         invalidateCustomerQueries(queryClient, variables.bill.customerId);
       }
@@ -1078,53 +1248,5 @@ export function useDashboardStats() {
     },
     // Refresh stats more frequently for POS environment
     refetchInterval: 30000, 
-  });
-}
-
-// --- Ops Hooks ---
-
-export function useBulkAdjustStock() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (data: { items: Array<{ productId: number; quantity: number; type: 'purchase' | 'sale' | 'adjustment' | 'damage' | 'return'; reason?: string }> }) => {
-      const res = await fetch(api.inventory.bulkAdjust.path, {
-        method: api.inventory.bulkAdjust.method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) {
-        const error = await res.json().catch(() => null);
-        throw new Error(error?.message || "Failed to apply bulk stock update");
-      }
-      return api.inventory.bulkAdjust.responses[201].parse(await res.json());
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
-      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
-      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
-    },
-  });
-}
-
-export function useRecurringPurchase() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (data: { note?: string; items: Array<{ productId: number; quantity: number; costPrice?: number }> }) => {
-      const res = await fetch(api.inventory.recurringPurchase.path, {
-        method: api.inventory.recurringPurchase.method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) {
-        const error = await res.json().catch(() => null);
-        throw new Error(error?.message || "Failed to apply recurring purchase");
-      }
-      return api.inventory.recurringPurchase.responses[201].parse(await res.json());
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [api.products.list.path] });
-      queryClient.invalidateQueries({ queryKey: [api.inventory.lowStock.path] });
-      queryClient.invalidateQueries({ queryKey: [api.inventory.history.path] });
-    },
   });
 }

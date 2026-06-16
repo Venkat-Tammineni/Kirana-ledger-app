@@ -5,6 +5,8 @@ import {
   useStaff,
   useStaffDetails,
   useUpdateStaffOverallPayment,
+  useUpdateStaffSalary,
+  useUpdateStaffSalaryPayment,
   useUpdateStaffTodayPayment,
 } from "@/hooks/use-pos";
 import { Input } from "@/components/ui/input";
@@ -26,12 +28,37 @@ type StaffDraft = {
   salaryAmount: string;
 };
 
+type AttendanceRangeMode = "month" | "custom";
+
 const defaultDraft: StaffDraft = {
   name: "",
   phone: "",
   salaryType: "daily",
   salaryAmount: "",
 };
+
+const PRIMARY_WORKER_NAME = "karthik";
+
+function getCurrentMonthRange() {
+  const now = new Date();
+  return {
+    start: new Date(now.getFullYear(), now.getMonth(), 1),
+    end: new Date(now.getFullYear(), now.getMonth() + 1, 0),
+  };
+}
+
+function getStaffAttendancePayment(
+  member: { salaryType: string; salaryAmount: string | number | null },
+  entry?: { status: string; payment?: string | number | null } | null,
+) {
+  if (!entry) return 0;
+
+  if (member.salaryType === "monthly") {
+    return entry.status === "present" ? Number(member.salaryAmount || 0) / 30 : 0;
+  }
+
+  return Number(entry.payment || 0);
+}
 
 export default function Staff() {
   const { toast } = useToast();
@@ -42,38 +69,101 @@ export default function Staff() {
   const { mutate: markAttendance, isPending: isMarking } = useMarkStaffAttendance();
   const { mutate: updateTodayPayment, isPending: isUpdatingTodayPayment } = useUpdateStaffTodayPayment();
   const { mutate: updateOverallPayment, isPending: isUpdatingOverallPayment } = useUpdateStaffOverallPayment();
+  const { mutate: updateStaffSalary, isPending: isUpdatingStaffSalary } = useUpdateStaffSalary();
+  const { mutate: updateSalaryPayment, isPending: isUpdatingSalaryPayment } = useUpdateStaffSalaryPayment();
 
   const [draft, setDraft] = useState<StaffDraft>(defaultDraft);
   const [selectedAttendanceDate, setSelectedAttendanceDate] = useState<Date>(new Date());
+  const [attendanceRangeMode, setAttendanceRangeMode] = useState<AttendanceRangeMode>("month");
+  const [customRangeStart, setCustomRangeStart] = useState<Date>(() => getCurrentMonthRange().start);
+  const [customRangeEnd, setCustomRangeEnd] = useState<Date>(() => getCurrentMonthRange().end);
   const [todayPaymentInput, setTodayPaymentInput] = useState("");
   const [overallPaymentInput, setOverallPaymentInput] = useState("");
+  const [rangePaidInput, setRangePaidInput] = useState("");
+  const [salaryTypeInput, setSalaryTypeInput] = useState<"daily" | "monthly">("daily");
+  const [salaryAmountInput, setSalaryAmountInput] = useState("");
+  const [applySalaryToRange, setApplySalaryToRange] = useState(false);
+  const orderedStaff = useMemo(() => {
+    return [...(staff ?? [])].sort((a, b) => {
+      const aIsPrimary = a.name.trim().toLowerCase() === PRIMARY_WORKER_NAME;
+      const bIsPrimary = b.name.trim().toLowerCase() === PRIMARY_WORKER_NAME;
+      if (aIsPrimary && !bIsPrimary) return -1;
+      if (!aIsPrimary && bIsPrimary) return 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  }, [staff]);
   const totalPaidToAllStaff = useMemo(
     () => (staff ?? []).reduce((sum, member) => sum + Number(member.totalPayment || 0), 0),
     [staff],
   );
 
   useEffect(() => {
-    if (!selectedStaffId && staff?.length) {
-      setSelectedStaffId(staff[0].id);
+    if (!selectedStaffId && orderedStaff.length) {
+      setSelectedStaffId(orderedStaff[0].id);
     }
-  }, [staff, selectedStaffId]);
+  }, [orderedStaff, selectedStaffId]);
 
   useEffect(() => {
     if (details) {
       setOverallPaymentInput(String(Number(details.summary.totalPayment || 0)));
+      setSalaryTypeInput(details.staff.salaryType as "daily" | "monthly");
+      setSalaryAmountInput(String(Number(details.staff.salaryAmount || 0)));
+      setApplySalaryToRange(false);
     }
   }, [details]);
 
   const selectedStaff = details?.staff;
   const selectedDateKey = useMemo(() => getISTDateKey(selectedAttendanceDate), [selectedAttendanceDate]);
   const selectedDateLabel = useMemo(() => formatDate(selectedAttendanceDate, "dd MMM yyyy"), [selectedAttendanceDate]);
+  const currentMonthRange = useMemo(() => getCurrentMonthRange(), []);
+  const attendanceRangeStart = attendanceRangeMode === "month" ? currentMonthRange.start : customRangeStart;
+  const attendanceRangeEnd = attendanceRangeMode === "month" ? currentMonthRange.end : customRangeEnd;
+  const attendanceRangeStartKey = useMemo(() => getISTDateKey(attendanceRangeStart), [attendanceRangeStart]);
+  const attendanceRangeEndKey = useMemo(() => getISTDateKey(attendanceRangeEnd), [attendanceRangeEnd]);
+  const attendanceRangeLabel = attendanceRangeMode === "month"
+    ? formatDate(currentMonthRange.start, "MMM yyyy")
+    : `${formatDate(customRangeStart, "dd MMM yyyy")} to ${formatDate(customRangeEnd, "dd MMM yyyy")}`;
   const selectedAttendance = useMemo(() => {
     return details?.attendance.find((entry) => (entry.date ? getISTDateKey(entry.date) : "") === selectedDateKey) || null;
   }, [details?.attendance, selectedDateKey]);
+  const selectedAttendancePayment = selectedStaff
+    ? getStaffAttendancePayment(selectedStaff, selectedAttendance)
+    : 0;
+  const rangeAttendance = useMemo(() => {
+    return (details?.attendance || []).filter((entry) => {
+      if (!entry.date) return false;
+      const entryKey = getISTDateKey(entry.date);
+      return entryKey >= attendanceRangeStartKey && entryKey <= attendanceRangeEndKey;
+    });
+  }, [attendanceRangeEndKey, attendanceRangeStartKey, details?.attendance]);
+  const rangeSummary = useMemo(() => {
+    if (!selectedStaff) {
+      return { presentDays: 0, absentDays: 0, payable: 0 };
+    }
+
+    return {
+      presentDays: rangeAttendance.filter((entry) => entry.status === "present").length,
+      absentDays: rangeAttendance.filter((entry) => entry.status === "absent").length,
+      payable: rangeAttendance.reduce((sum, entry) => sum + getStaffAttendancePayment(selectedStaff, entry), 0),
+    };
+  }, [rangeAttendance, selectedStaff]);
+  const rangePayment = useMemo(() => {
+    return (details?.payments || []).find((payment) => {
+      const paymentStartKey = getISTDateKey(payment.rangeStart);
+      const paymentEndKey = getISTDateKey(payment.rangeEnd);
+      return paymentStartKey === attendanceRangeStartKey && paymentEndKey === attendanceRangeEndKey;
+    }) || null;
+  }, [attendanceRangeEndKey, attendanceRangeStartKey, details?.payments]);
+  const rangePaidAmount = Number(rangePayment?.amount || 0);
+  const rangeBalance = Math.max(0, rangeSummary.payable - rangePaidAmount);
 
   useEffect(() => {
-    setTodayPaymentInput(String(Number(selectedAttendance?.payment || 0)));
-  }, [selectedAttendance]);
+    setTodayPaymentInput(String(selectedAttendancePayment));
+  }, [selectedAttendancePayment]);
+
+  useEffect(() => {
+    setRangePaidInput(String(rangePaidAmount));
+  }, [rangePaidAmount]);
 
   const handleCreateStaff = () => {
     if (!draft.name.trim() || !draft.phone.trim() || !draft.salaryAmount) {
@@ -164,6 +254,56 @@ export default function Staff() {
     );
   };
 
+  const handleSaveRangePayment = () => {
+    if (!selectedStaffId) return;
+
+    updateSalaryPayment(
+      {
+        staffId: selectedStaffId,
+        rangeStart: attendanceRangeStartKey,
+        rangeEnd: attendanceRangeEndKey,
+        amount: Number(rangePaidInput || 0),
+        note: `Salary paid for ${attendanceRangeLabel}`,
+      },
+      {
+        onSuccess: () => {
+          toast({ title: "Salary payment saved", description: `${attendanceRangeLabel} paid amount updated.` });
+        },
+        onError: (error: Error) => {
+          toast({ title: "Failed", description: error.message, variant: "destructive" });
+        },
+      },
+    );
+  };
+
+  const handleSaveStaffSalary = () => {
+    if (!selectedStaffId) return;
+
+    updateStaffSalary(
+      {
+        staffId: selectedStaffId,
+        salaryType: salaryTypeInput,
+        salaryAmount: Number(salaryAmountInput || 0),
+        applyToRange: salaryTypeInput === "daily" ? applySalaryToRange : false,
+        rangeStart: attendanceRangeStartKey,
+        rangeEnd: attendanceRangeEndKey,
+      },
+      {
+        onSuccess: () => {
+          toast({
+            title: "Daily payment updated",
+            description: applySalaryToRange && salaryTypeInput === "daily"
+              ? `Present days in ${attendanceRangeLabel} now use this amount.`
+              : "Future attendance will use this amount.",
+          });
+        },
+        onError: (error: Error) => {
+          toast({ title: "Failed", description: error.message, variant: "destructive" });
+        },
+      },
+    );
+  };
+
   const staffVoiceCommands = [
     {
       label: "Mark present or absent",
@@ -204,8 +344,8 @@ export default function Staff() {
     <>
     <div className="p-6 md:p-8 max-w-7xl mx-auto pb-24 md:pb-8 space-y-6">
       <div>
-        <h1 className="text-3xl font-display font-bold text-foreground">Staff Management</h1>
-        <p className="text-muted-foreground mt-1">Create staff, track attendance, and manage payment summaries without affecting POS workflows.</p>
+        <h1 className="text-2xl font-display font-bold text-foreground">Staff Management</h1>
+        <p className="text-sm text-muted-foreground mt-1">Create staff, track attendance, and manage payment summaries without affecting POS workflows.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -213,8 +353,8 @@ export default function Staff() {
         <MetricCard title="Overall Paid to Staff" value={formatCurrencyINR(totalPaidToAllStaff)} icon={<Wallet className="w-5 h-5" />} />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-6">
-        <div className="space-y-6">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-6">
+        <div className="space-y-6 lg:order-2">
           <div className="bg-card rounded-2xl border border-border p-5 shadow-sm space-y-4">
             <div className="flex items-center gap-2">
               <UserPlus className="w-5 h-5 text-primary" />
@@ -265,7 +405,7 @@ export default function Staff() {
               </div>
             ) : (
               <div className="space-y-3">
-                {staff?.map((member) => (
+                {orderedStaff.map((member) => (
                   <button
                     key={member.id}
                     type="button"
@@ -279,7 +419,14 @@ export default function Staff() {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="font-semibold">{member.name}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="font-semibold">{member.name}</div>
+                          {member.name.trim().toLowerCase() === PRIMARY_WORKER_NAME ? (
+                            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                              Primary Worker
+                            </span>
+                          ) : null}
+                        </div>
                         <div className="text-sm text-muted-foreground">{member.phone}</div>
                         <div className="text-xs text-muted-foreground mt-1 capitalize">
                           {member.salaryType} salary: {formatCurrencyINR(Number(member.salaryAmount || 0))}
@@ -304,7 +451,7 @@ export default function Staff() {
           </div>
         </div>
 
-        <div className="space-y-6">
+        <div className="space-y-6 lg:order-1">
           {detailsLoading ? (
             <Skeleton className="h-[520px] rounded-2xl" />
           ) : selectedStaff && details ? (
@@ -312,8 +459,8 @@ export default function Staff() {
               <div className="bg-card rounded-2xl border border-border p-6 shadow-sm space-y-5">
                 <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                   <div>
-                    <h2 className="text-2xl font-display font-bold">{selectedStaff.name}</h2>
-                    <p className="text-muted-foreground">{selectedStaff.phone}</p>
+                    <h2 className="text-xl font-display font-bold">{selectedStaff.name}</h2>
+                    <p className="text-sm text-muted-foreground">{selectedStaff.phone}</p>
                     <p className="text-sm text-muted-foreground mt-1 capitalize">
                       {selectedStaff.salaryType} salary: {formatCurrencyINR(Number(selectedStaff.salaryAmount || 0))}
                     </p>
@@ -331,15 +478,114 @@ export default function Staff() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                  <MetricCard title="Present Days" value={details.summary.presentDays} icon={<CheckCircle2 className="w-5 h-5" />} />
-                  <MetricCard title="Absent Days" value={details.summary.absentDays} icon={<XCircle className="w-5 h-5" />} />
-                  <MetricCard title="Payable Now" value={formatCurrencyINR(details.summary.thisMonthPayable)} icon={<Wallet className="w-5 h-5" />} />
-                  <MetricCard title={`Payment on ${formatDate(selectedAttendanceDate, "dd MMM")}`} value={formatCurrencyINR(Number(selectedAttendance?.payment || 0))} icon={<CalendarDays className="w-5 h-5" />} />
-                  <MetricCard title="Total Paid" value={formatCurrencyINR(details.summary.totalPayment)} icon={<Wallet className="w-5 h-5" />} />
+                <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                    <div>
+                      <h3 className="font-semibold">Attendance Summary Range</h3>
+                      <p className="text-sm text-muted-foreground">Showing present, absent, payable, and history for {attendanceRangeLabel}.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant={attendanceRangeMode === "month" ? "default" : "outline"}
+                        onClick={() => setAttendanceRangeMode("month")}
+                      >
+                        This Month
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={attendanceRangeMode === "custom" ? "default" : "outline"}
+                        onClick={() => setAttendanceRangeMode("custom")}
+                      >
+                        Custom Range
+                      </Button>
+                    </div>
+                  </div>
+                  {attendanceRangeMode === "custom" && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">From</label>
+                        <Input
+                          type="date"
+                          value={toDateInputString(customRangeStart)}
+                          onChange={(e) => setCustomRangeStart(new Date(`${e.target.value}T00:00:00`))}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">To</label>
+                        <Input
+                          type="date"
+                          value={toDateInputString(customRangeEnd)}
+                          onChange={(e) => setCustomRangeEnd(new Date(`${e.target.value}T00:00:00`))}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  <MetricCard
+                    title={selectedStaff.salaryType === "monthly" ? "Monthly Salary" : "Daily Salary"}
+                    value={formatCurrencyINR(Number(selectedStaff.salaryAmount || 0))}
+                    subValue={selectedStaff.salaryType === "monthly" ? "Before leave deduction" : "Per present day"}
+                    icon={<Wallet className="w-5 h-5" />}
+                  />
+                  <MetricCard title="Present Days" value={rangeSummary.presentDays} subValue={attendanceRangeLabel} icon={<CheckCircle2 className="w-5 h-5" />} />
+                  <MetricCard title="Absent Days" value={rangeSummary.absentDays} subValue={attendanceRangeLabel} icon={<XCircle className="w-5 h-5" />} />
+                  <MetricCard title="Salary Payable" value={formatCurrencyINR(rangeSummary.payable)} subValue={attendanceRangeLabel} icon={<Wallet className="w-5 h-5" />} />
+                  <MetricCard title={`Paid for ${attendanceRangeLabel}`} value={formatCurrencyINR(rangePaidAmount)} icon={<Wallet className="w-5 h-5" />} />
+                  <MetricCard title="Balance" value={formatCurrencyINR(rangeBalance)} subValue={rangeBalance > 0 ? "Still pending" : "Fully paid"} icon={<Wallet className="w-5 h-5" />} />
+                  <MetricCard title={`Earned on ${formatDate(selectedAttendanceDate, "dd MMM")}`} value={formatCurrencyINR(selectedAttendancePayment)} icon={<CalendarDays className="w-5 h-5" />} />
                 </div>
 
                 <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                  <div className="rounded-xl border border-border p-4 space-y-3">
+                    <h3 className="font-semibold">Edit Daily Payment Mode or Range</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Set the daily worker amount here. For example, enter 500 for a worker paid 500 per present day.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Payment Mode</label>
+                        <select
+                          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          value={salaryTypeInput}
+                          onChange={(e) => setSalaryTypeInput(e.target.value as "daily" | "monthly")}
+                        >
+                          <option value="daily">Daily</option>
+                          <option value="monthly">Monthly</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">
+                          {salaryTypeInput === "daily" ? "Daily Payment" : "Monthly Salary"}
+                        </label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={salaryAmountInput}
+                          onChange={(e) => setSalaryAmountInput(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                    {salaryTypeInput === "daily" && (
+                      <label className="flex items-start gap-2 rounded-lg border border-border bg-muted/20 p-3 text-sm">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={applySalaryToRange}
+                          onChange={(e) => setApplySalaryToRange(e.target.checked)}
+                        />
+                        <span>
+                          Apply this daily payment to all present days in {attendanceRangeLabel}.
+                        </span>
+                      </label>
+                    )}
+                    <Button onClick={handleSaveStaffSalary} disabled={isUpdatingStaffSalary} className="w-full">
+                      {isUpdatingStaffSalary ? "Saving..." : "Save Daily Payment Mode"}
+                    </Button>
+                  </div>
+
                   <div className="rounded-xl border border-border p-4 space-y-3">
                     <h3 className="font-semibold">Mark Attendance</h3>
                     <p className="text-sm text-muted-foreground">
@@ -351,6 +597,11 @@ export default function Staff() {
                     {selectedStaff.salaryType === "daily" && (
                       <p className="text-sm text-muted-foreground">
                         Daily wage: <span className="font-medium text-foreground">{formatCurrencyINR(Number(selectedStaff.salaryAmount || 0))}</span>
+                      </p>
+                    )}
+                    {selectedStaff.salaryType === "monthly" && (
+                      <p className="text-sm text-muted-foreground">
+                        Present day value: <span className="font-medium text-foreground">{formatCurrencyINR(Number(selectedStaff.salaryAmount || 0) / 30)}</span>
                       </p>
                     )}
                     <div className="flex gap-3">
@@ -372,28 +623,67 @@ export default function Staff() {
                   </div>
 
                   <div className="rounded-xl border border-border p-4 space-y-3">
-                    <h3 className="font-semibold">Edit Selected Date Payment</h3>
+                    <h3 className="font-semibold">
+                      {selectedStaff.salaryType === "monthly" ? "Selected Date Value" : "Edit Selected Date Payment"}
+                    </h3>
                     <p className="text-sm text-muted-foreground">
-                      Daily staff auto-fill from daily wage when marked present. Editing payment only updates the existing record for {selectedDateLabel}.
+                      Daily staff use this as actual daily payment. Monthly staff are calculated from attendance: present adds one day value, absent adds zero.
                     </p>
                     <Input
                       type="number"
                       min="0"
                       value={todayPaymentInput}
                       onChange={(e) => setTodayPaymentInput(e.target.value)}
+                      readOnly={selectedStaff.salaryType === "monthly"}
+                      className={selectedStaff.salaryType === "monthly" ? "bg-muted/30" : undefined}
                     />
-                    <Button onClick={handleSaveTodayPayment} disabled={isUpdatingTodayPayment} className="w-full">
+                    <Button
+                      onClick={handleSaveTodayPayment}
+                      disabled={isUpdatingTodayPayment || selectedStaff.salaryType === "monthly"}
+                      className="w-full"
+                    >
                       {isUpdatingTodayPayment ? "Saving..." : "Save Selected Date Payment"}
                     </Button>
                   </div>
 
                   <div className="rounded-xl border border-border p-4 space-y-3">
-                    <h3 className="font-semibold">Edit Overall Payment</h3>
+                    <h3 className="font-semibold">Salary Settlement</h3>
                     <p className="text-sm text-muted-foreground">
-                      Set the total payment you want to track overall. The system stores only the adjustment, so attendance logic stays intact.
+                      Enter the amount paid for {attendanceRangeLabel}. For April example: salary payable 14000, paid 14000, balance 0.
                     </p>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium">Total Amount Paid to Staff</label>
+                      <label className="text-sm font-medium">Salary Payable</label>
+                      <Input value={formatCurrencyINR(rangeSummary.payable)} readOnly className="bg-muted/30" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Paid for {attendanceRangeLabel}</label>
+                      <Input
+                        type="number"
+                        min="0"
+                        value={rangePaidInput}
+                        onChange={(e) => setRangePaidInput(e.target.value)}
+                      />
+                    </div>
+                    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Balance</span>
+                        <span className={cn("font-mono font-bold", rangeBalance > 0 ? "text-red-600" : "text-green-600")}>
+                          {formatCurrencyINR(Math.max(0, rangeSummary.payable - Number(rangePaidInput || 0)))}
+                        </span>
+                      </div>
+                    </div>
+                    <Button onClick={handleSaveRangePayment} disabled={isUpdatingSalaryPayment} className="w-full">
+                      {isUpdatingSalaryPayment ? "Saving..." : "Save Salary Payment"}
+                    </Button>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4 space-y-3">
+                    <h3 className="font-semibold">Legacy Total Paid</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Use this only for old records before month-wise salary payment was added.
+                    </p>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Legacy Total Amount Paid</label>
                       <Input value={formatCurrencyINR(details.summary.totalPayment)} readOnly className="bg-muted/30" />
                     </div>
                     <Input
@@ -403,7 +693,7 @@ export default function Staff() {
                       onChange={(e) => setOverallPaymentInput(e.target.value)}
                     />
                     <Button onClick={handleSaveOverallPayment} disabled={isUpdatingOverallPayment} className="w-full">
-                      {isUpdatingOverallPayment ? "Saving..." : "Save Overall Payment"}
+                      {isUpdatingOverallPayment ? "Saving..." : "Save Legacy Total"}
                     </Button>
                   </div>
                 </div>
@@ -413,7 +703,7 @@ export default function Staff() {
                 <div className="flex items-center justify-between mb-4">
                   <div>
                     <h3 className="font-semibold text-lg">Attendance History</h3>
-                    <p className="text-sm text-muted-foreground">Date-wise attendance and payment records for this staff member.</p>
+                    <p className="text-sm text-muted-foreground">Date-wise attendance and payment records for {attendanceRangeLabel}.</p>
                   </div>
                 </div>
                 <div className="overflow-x-auto">
@@ -426,17 +716,17 @@ export default function Staff() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/60">
-                      {details.attendance.map((entry) => (
+                      {rangeAttendance.map((entry) => (
                         <tr key={entry.id}>
                           <td className="py-3 pr-4">{formatDate(entry.date, "dd MMM yyyy")}</td>
                           <td className="py-3 pr-4 capitalize">{entry.status}</td>
-                          <td className="py-3 pr-4 text-right font-mono">{formatCurrencyINR(Number(entry.payment || 0))}</td>
+                          <td className="py-3 pr-4 text-right font-mono">{formatCurrencyINR(getStaffAttendancePayment(selectedStaff, entry))}</td>
                         </tr>
                       ))}
-                      {details.attendance.length === 0 && (
+                      {rangeAttendance.length === 0 && (
                         <tr>
                           <td colSpan={3} className="py-8 text-center text-muted-foreground">
-                            No attendance records yet.
+                            No attendance records for {attendanceRangeLabel}.
                           </td>
                         </tr>
                       )}

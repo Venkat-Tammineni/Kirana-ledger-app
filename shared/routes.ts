@@ -27,7 +27,7 @@ const createBillSchema = z.object({
     name: z.string(),
     quantity: z.number().min(1),
     unit: z.enum(UNIT_OPTIONS).optional(),
-    baseQuantity: z.number().int().min(1).optional(),
+    baseQuantity: z.number().min(0.001).optional(),
     baseUnit: z.enum(UNIT_OPTIONS).optional(),
     price: z.number().min(0), // Selling price
     costPrice: z.number().min(0).optional(), // Cost price (optional, defaults to 0)
@@ -48,7 +48,7 @@ const updateBillSchema = z.object({
     name: z.string(),
     quantity: z.number().min(1),
     unit: z.enum(UNIT_OPTIONS).optional(),
-    baseQuantity: z.number().int().min(1).optional(),
+    baseQuantity: z.number().min(0.001).optional(),
     baseUnit: z.enum(UNIT_OPTIONS).optional(),
     price: z.number().min(0),
     costPrice: z.number().min(0).optional(),
@@ -70,6 +70,10 @@ const billItemMemoryQuerySchema = z.object({
   message: "productId or name is required",
 });
 
+const previousBillQuerySchema = z.object({
+  customerId: z.coerce.number().int().positive(),
+});
+
 const billItemMemoryResponseSchema = z.object({
   productId: z.number().nullable(),
   name: z.string(),
@@ -81,14 +85,19 @@ const billItemMemoryResponseSchema = z.object({
   billDate: z.string(),
 });
 
+const previousBillResponseSchema = z.custom<typeof bills.$inferSelect & {
+  items: typeof billItems.$inferSelect[];
+  charges: typeof billCharges.$inferSelect[];
+}>();
+
 const createQuotationSchema = z.object({
   customerId: z.number().optional(),
   items: z.array(z.object({
     productId: z.number().optional(),
     name: z.string(),
-    quantity: z.number().min(1),
+    quantity: z.number().min(0),
     unit: z.enum(UNIT_OPTIONS).optional(),
-    baseQuantity: z.number().int().min(1).optional(),
+    baseQuantity: z.number().min(0).optional(),
     baseUnit: z.enum(UNIT_OPTIONS).optional(),
     price: z.number().min(0),
     costPrice: z.number().min(0).optional(),
@@ -146,6 +155,21 @@ const updateStaffOverallPaymentSchema = z.object({
   totalPayment: z.number().min(0),
 });
 
+const updateStaffSalaryPaymentSchema = z.object({
+  rangeStart: z.string(),
+  rangeEnd: z.string(),
+  amount: z.number().min(0),
+  note: z.string().optional(),
+});
+
+const updateStaffSalarySchema = z.object({
+  salaryType: z.enum(["daily", "monthly"]),
+  salaryAmount: z.number().min(0),
+  applyToRange: z.boolean().optional(),
+  rangeStart: z.string().optional(),
+  rangeEnd: z.string().optional(),
+});
+
 const createInvestmentEntrySchema = z.object({
   amount: z.number().min(0.01, "Amount must be greater than zero"),
   note: z.string().min(1, "Note is required"),
@@ -154,7 +178,7 @@ const createInvestmentEntrySchema = z.object({
     .array(
       z.object({
         productId: z.number(),
-        quantity: z.number().min(1, "Quantity must be greater than zero"),
+        quantity: z.number().min(0.001, "Quantity must be greater than zero"),
         costPrice: z.number().min(0, "Rate cannot be negative").optional(),
       }),
     )
@@ -164,6 +188,7 @@ const createInvestmentEntrySchema = z.object({
 const investmentHistoryEntrySchema = z.object({
   id: z.number(),
   source: z.enum(["account_spent", "manual"]),
+  accountId: z.number().nullable().optional(),
   sourceLabel: z.string(),
   amount: z.number(),
   note: z.string().nullable(),
@@ -293,7 +318,7 @@ const ledgerEntryResponseSchema = z.object({
   runningBalance: z.number(),
 });
 
-// Accept price/costPrice as number or string from the client, normalize to string for the server/DB.
+// Accept DB numeric fields as number or string from the client, normalize to string for the server/DB.
 const numericString = () =>
   z.preprocess(
     (v) => {
@@ -307,6 +332,8 @@ const numericString = () =>
 const productInputSchema = insertProductSchema.extend({
   price: numericString().nullable().optional(),
   costPrice: numericString().nullable().optional(),
+  stock: numericString().optional(),
+  lowStockThreshold: numericString().nullable().optional(),
   primaryUnit: z.enum(UNIT_OPTIONS).optional(),
   secondaryUnit: z.enum(UNIT_OPTIONS).nullable().optional(),
   unitConversion: z.coerce.number().int().min(2).nullable().optional(),
@@ -349,6 +376,14 @@ export const api = {
             todayPayment: number;
           };
           attendance: typeof staffAttendance.$inferSelect[];
+          payments: Array<{
+            id: number;
+            staffId: number;
+            rangeStart: string;
+            rangeEnd: string;
+            amount: number;
+            note: string | null;
+          }>;
         }>(),
         404: errorSchemas.notFound,
       },
@@ -399,6 +434,33 @@ export const api = {
         404: errorSchemas.notFound,
       },
     },
+    updateSalary: {
+      method: "PATCH" as const,
+      path: "/api/staff/:id/salary",
+      input: updateStaffSalarySchema,
+      responses: {
+        200: z.custom<typeof staff.$inferSelect>(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
+    updateSalaryPayment: {
+      method: "POST" as const,
+      path: "/api/staff/:id/salary-payment",
+      input: updateStaffSalaryPaymentSchema,
+      responses: {
+        200: z.object({
+          id: z.number(),
+          staffId: z.number(),
+          rangeStart: z.string(),
+          rangeEnd: z.string(),
+          amount: z.number(),
+          note: z.string().nullable(),
+        }),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
   },
   accounts: {
     list: {
@@ -416,7 +478,7 @@ export const api = {
           account: typeof accounts.$inferSelect;
           currentBalance: number;
           totalSpent: number;
-          transactions: typeof accountTransactions.$inferSelect[];
+          transactions: Array<typeof accountTransactions.$inferSelect & { customerId?: number | null }>;
         }>(),
         404: errorSchemas.notFound,
       },
@@ -450,6 +512,16 @@ export const api = {
       input: z.object({
         amount: z.number().min(0.01),
         note: z.string().min(1, "Note is required"),
+        date: z.string().optional(),
+        purchases: z
+          .array(
+            z.object({
+              productId: z.number(),
+              quantity: z.number().min(0.001, "Quantity must be greater than zero"),
+              costPrice: z.number().min(0, "Rate cannot be negative").optional(),
+            }),
+          )
+          .default([]),
       }),
       responses: {
         201: z.custom<typeof accountTransactions.$inferSelect>(),
@@ -478,6 +550,20 @@ export const api = {
         404: errorSchemas.notFound,
       },
     },
+    updateTransaction: {
+      method: 'PATCH' as const,
+      path: '/api/accounts/:id/transactions/:transactionId',
+      input: z.object({
+        amount: z.number().min(0.01),
+        note: z.string().min(1, "Note is required"),
+        customerId: z.number().nullable().optional(),
+      }),
+      responses: {
+        200: z.custom<typeof accountTransactions.$inferSelect>(),
+        400: errorSchemas.validation,
+        404: errorSchemas.notFound,
+      },
+    },
     addInvestment: {
       method: 'POST' as const,
       path: '/api/accounts/investment',
@@ -490,6 +576,15 @@ export const api = {
           date: z.union([z.string(), z.date()]),
         }),
         400: errorSchemas.validation,
+      },
+    },
+    deleteInvestment: {
+      method: 'DELETE' as const,
+      path: '/api/accounts/investment/:id',
+      responses: {
+        204: z.void(),
+        400: z.object({ message: z.string() }),
+        404: errorSchemas.notFound,
       },
     },
     deleteSafe: {
@@ -533,6 +628,8 @@ export const api = {
       path: '/api/customers/:id',
       input: z.object({
         profitDate: z.string().optional(),
+        startDate: z.string().optional(),
+        endDate: z.string().optional(),
       }).optional(),
         responses: {
           200: z.custom<typeof customers.$inferSelect & { 
@@ -723,6 +820,15 @@ export const api = {
       input: billItemMemoryQuerySchema,
       responses: {
         200: billItemMemoryResponseSchema.nullable(),
+        400: errorSchemas.validation,
+      },
+    },
+    previous: {
+      method: 'GET' as const,
+      path: '/api/bills/previous',
+      input: previousBillQuerySchema,
+      responses: {
+        200: previousBillResponseSchema.nullable(),
         400: errorSchemas.validation,
       },
     },
@@ -957,6 +1063,15 @@ export const api = {
             unit: z.string(),
             totalSales: z.number(),
             totalProfit: z.number(),
+            details: z.array(z.object({
+              billId: z.number(),
+              date: z.union([z.string(), z.date()]),
+              quantity: z.number(),
+              unit: z.string(),
+              rate: z.number(),
+              sales: z.number(),
+              profit: z.number(),
+            })),
           })),
         }),
       },
@@ -974,149 +1089,42 @@ export const api = {
           customerName: z.string(),
           totalSales: z.number(),
           totalProfit: z.number(),
+          items: z.array(z.object({
+            productId: z.number().nullable(),
+            itemName: z.string(),
+            quantity: z.number(),
+            unit: z.string(),
+            totalSales: z.number(),
+            totalProfit: z.number(),
+          })),
         })),
       },
     },
-  },
-  advancedReports: {
-    overview: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/overview",
-      input: advancedRangeSchema,
+    itemBills: {
+      method: 'GET' as const,
+      path: '/api/reporting/item-bills',
+      input: z.object({
+        startDate: z.string(),
+        endDate: z.string(),
+        search: z.string().trim().min(1),
+      }),
       responses: {
-        200: z.object({
-          cards: z.object({
-            sales: advancedOverviewCardSchema,
-            purchases: advancedOverviewCardSchema,
-            profitLoss: advancedOverviewCardSchema,
-            outstanding: advancedOverviewCardSchema,
-            stockSummary: advancedOverviewCardSchema,
-            cashbook: advancedOverviewCardSchema,
-          }),
-        }),
-      },
-    },
-    sales: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/sales",
-      input: advancedRangeSchema,
-      responses: {
-        200: z.object({
-          metrics: z.object({
-            totalSales: z.number(),
-            billCount: z.number(),
-            avgBillValue: z.number(),
-            gstCollected: z.number(),
-          }),
-          breakdown: z.object({
-            paid: advancedBreakdownSliceSchema,
-            unpaid: advancedBreakdownSliceSchema,
-            partial: advancedBreakdownSliceSchema,
-          }),
-          trend: z.array(advancedTrendPointSchema),
-          topCustomers: z.array(advancedTopCustomerSchema),
-          table: z.array(advancedSalesRowSchema),
-          gstSummary: advancedGstSummarySchema,
-        }),
-      },
-    },
-    purchases: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/purchases",
-      input: advancedRangeSchema,
-      responses: {
-        200: z.object({
-          metrics: z.object({
-            totalPurchases: z.number(),
-            billCount: z.number(),
-            avgBillValue: z.number(),
-            gstCollected: z.number(),
-          }),
-          breakdown: z.object({
-            paid: advancedBreakdownSliceSchema,
-            unpaid: advancedBreakdownSliceSchema,
-            partial: advancedBreakdownSliceSchema,
-          }),
-          trend: z.array(advancedTrendPointSchema),
-          topProducts: z.array(advancedTopProductSchema),
-          table: z.array(advancedPurchaseRowSchema),
-          gstSummary: advancedGstSummarySchema.extend({
-            input: z.number(),
-            output: z.number(),
-            netPayable: z.number(),
-          }),
-        }),
-      },
-    },
-    profitLoss: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/profit-loss",
-      input: advancedRangeSchema,
-      responses: {
-        200: z.object({
-          metrics: z.object({
-            netRevenue: z.number(),
-            cogs: z.number(),
-            grossProfit: z.number(),
-            expenses: z.number(),
-            netProfit: z.number(),
-            grossMarginPct: z.number(),
-            netMarginPct: z.number(),
-          }),
-          trend: z.array(advancedTrendPointSchema),
-          expenseBreakdown: z.array(advancedExpenseBreakdownSchema),
-        }),
-      },
-    },
-    outstanding: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/outstanding",
-      responses: {
-        200: z.object({
-          metrics: z.object({
-            totalOutstanding: z.number(),
-            customerCount: z.number(),
-          }),
-          aging: z.object({
-            bucket0To7: z.number(),
-            bucket8To30: z.number(),
-            bucket31To60: z.number(),
-            bucket60Plus: z.number(),
-          }),
-          table: z.array(advancedOutstandingRowSchema),
-        }),
-      },
-    },
-    stockSummary: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/stock-summary",
-      responses: {
-        200: z.object({
-          metrics: z.object({
-            totalItems: z.number(),
-            stockValue: z.number(),
-            potentialProfit: z.number(),
-          }),
-          table: z.array(advancedStockRowSchema),
-        }),
-      },
-    },
-    cashbook: {
-      method: "GET" as const,
-      path: "/api/advanced-reports/cashbook",
-      input: advancedRangeSchema,
-      responses: {
-        200: z.object({
-          metrics: z.object({
-            openingBalance: z.number(),
-            totalCashIn: z.number(),
-            totalCashOut: z.number(),
-            balance: z.number(),
-          }),
-          breakdown: z.array(advancedCashbookBreakdownSchema),
-          trend: z.array(advancedTrendPointSchema),
-          table: z.array(advancedCashbookRowSchema),
-        }),
+        200: z.array(z.object({
+          id: z.number(),
+          billNumber: z.number().nullable().optional(),
+          customerName: z.string().nullable(),
+          date: z.union([z.string(), z.date()]).nullable(),
+          status: z.string().nullable().optional(),
+          totalAmount: z.union([z.string(), z.number()]),
+          totalProfit: z.union([z.string(), z.number()]).nullable().optional(),
+          matchedItems: z.array(z.object({
+            name: z.string(),
+            quantity: z.number(),
+            unit: z.string().nullable(),
+            price: z.union([z.string(), z.number()]),
+            subtotal: z.union([z.string(), z.number()]),
+          })),
+        })),
       },
     },
   },

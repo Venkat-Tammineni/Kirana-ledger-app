@@ -26,8 +26,8 @@ export const products = pgTable("products", {
   unitConversion: integer("unit_conversion"),
   sku: text("sku"),
   isActive: boolean("is_active").default(true),
-  stock: integer("stock").default(0).notNull(), // Current stock quantity
-  lowStockThreshold: integer("low_stock_threshold").default(10), // Alert when stock falls below this
+  stock: numeric("stock", { precision: 12, scale: 3 }).default("0").notNull(), // Current stock quantity
+  lowStockThreshold: numeric("low_stock_threshold", { precision: 12, scale: 3 }).default("10"), // Alert when stock falls below this
 });
 
 // === Bills ===
@@ -56,7 +56,7 @@ export const billItems = pgTable("bill_items", {
   name: text("name").notNull(), // Snapshot of name in case product changes
   quantity: doublePrecision("quantity").notNull(),
   unit: text("unit").default("PCS"),
-  baseQuantity: integer("base_quantity"),
+  baseQuantity: doublePrecision("base_quantity"),
   baseUnit: text("base_unit"),
   price: numeric("price", { precision: 10, scale: 3 }).notNull(), // Snapshot of selling price
   costPrice: numeric("cost_price", { precision: 10, scale: 3 }).default("0"), // Snapshot of cost price
@@ -93,7 +93,7 @@ export const quotationItems = pgTable("quotation_items", {
   name: text("name").notNull(),
   quantity: doublePrecision("quantity").notNull(),
   unit: text("unit").default("PCS"),
-  baseQuantity: integer("base_quantity"),
+  baseQuantity: doublePrecision("base_quantity"),
   baseUnit: text("base_unit"),
   price: numeric("price", { precision: 10, scale: 3 }).notNull(),
   costPrice: numeric("cost_price", { precision: 10, scale: 3 }).default("0"),
@@ -146,7 +146,7 @@ export const ledgerEntries = pgTable("ledger_entries", {
 export const stockAdjustments = pgTable("stock_adjustments", {
   id: serial("id").primaryKey(),
   productId: integer("product_id").notNull().references(() => products.id),
-  quantity: integer("quantity").notNull(), // Positive = added, Negative = removed
+  quantity: doublePrecision("quantity").notNull(), // Positive = added, Negative = removed
   type: text("type").notNull(), // 'purchase', 'sale', 'adjustment', 'damage', 'return'
   reason: text("reason"), // Optional note explaining the change
   billId: integer("bill_id").references(() => bills.id), // If stock change was from a bill
@@ -182,6 +182,16 @@ export const staffAttendance = pgTable("staff_attendance", {
   createdAt: timestamptz("created_at").defaultNow(),
 });
 
+export const staffSalaryPayments = pgTable("staff_salary_payments", {
+  id: serial("id").primaryKey(),
+  staffId: integer("staff_id").notNull().references(() => staff.id),
+  rangeStart: timestamptz("range_start").notNull(),
+  rangeEnd: timestamptz("range_end").notNull(),
+  amount: numeric("amount", { precision: 10, scale: 2 }).notNull().default("0"),
+  note: text("note"),
+  createdAt: timestamptz("created_at").defaultNow(),
+});
+
 // === Account Transactions ===
 export const accountTransactions = pgTable("account_transactions", {
   id: serial("id").primaryKey(),
@@ -199,6 +209,26 @@ export const investmentEntries = pgTable("investment_entries", {
   amount: numeric("amount", { precision: 10, scale: 2 }).notNull(),
   note: text("note"),
   date: timestamptz("date").defaultNow(),
+});
+
+export const investmentEntryPurchases = pgTable("investment_entry_purchases", {
+  id: serial("id").primaryKey(),
+  investmentEntryId: integer("investment_entry_id").notNull().references(() => investmentEntries.id),
+  productId: integer("product_id").notNull().references(() => products.id),
+  quantity: doublePrecision("quantity").notNull(),
+  costPrice: numeric("cost_price", { precision: 10, scale: 3 }),
+  previousCostPrice: numeric("previous_cost_price", { precision: 10, scale: 3 }),
+  createdAt: timestamptz("created_at").defaultNow(),
+});
+
+export const accountTransactionPurchases = pgTable("account_transaction_purchases", {
+  id: serial("id").primaryKey(),
+  accountTransactionId: integer("account_transaction_id").notNull().references(() => accountTransactions.id),
+  productId: integer("product_id").notNull().references(() => products.id),
+  quantity: doublePrecision("quantity").notNull(),
+  costPrice: numeric("cost_price", { precision: 10, scale: 3 }),
+  previousCostPrice: numeric("previous_cost_price", { precision: 10, scale: 3 }),
+  createdAt: timestamptz("created_at").defaultNow(),
 });
 
 // === RELATIONS ===
@@ -315,6 +345,7 @@ export const accountsRelations = relations(accounts, ({ many }) => ({
 
 export const staffRelations = relations(staff, ({ many }) => ({
   attendance: many(staffAttendance),
+  salaryPayments: many(staffSalaryPayments),
 }));
 
 export const staffAttendanceRelations = relations(staffAttendance, ({ one }) => ({
@@ -324,10 +355,39 @@ export const staffAttendanceRelations = relations(staffAttendance, ({ one }) => 
   }),
 }));
 
+export const staffSalaryPaymentsRelations = relations(staffSalaryPayments, ({ one }) => ({
+  staff: one(staff, {
+    fields: [staffSalaryPayments.staffId],
+    references: [staff.id],
+  }),
+}));
+
 export const accountTransactionsRelations = relations(accountTransactions, ({ one }) => ({
   account: one(accounts, {
     fields: [accountTransactions.accountId],
     references: [accounts.id],
+  }),
+}));
+
+export const investmentEntryPurchasesRelations = relations(investmentEntryPurchases, ({ one }) => ({
+  investmentEntry: one(investmentEntries, {
+    fields: [investmentEntryPurchases.investmentEntryId],
+    references: [investmentEntries.id],
+  }),
+  product: one(products, {
+    fields: [investmentEntryPurchases.productId],
+    references: [products.id],
+  }),
+}));
+
+export const accountTransactionPurchasesRelations = relations(accountTransactionPurchases, ({ one }) => ({
+  accountTransaction: one(accountTransactions, {
+    fields: [accountTransactionPurchases.accountTransactionId],
+    references: [accountTransactions.id],
+  }),
+  product: one(products, {
+    fields: [accountTransactionPurchases.productId],
+    references: [products.id],
   }),
 }));
 
@@ -348,6 +408,8 @@ export const insertStaffSchema = createInsertSchema(staff).omit({ id: true, crea
 export const insertStaffAttendanceSchema = createInsertSchema(staffAttendance).omit({ id: true, createdAt: true });
 export const insertAccountTransactionSchema = createInsertSchema(accountTransactions).omit({ id: true, date: true });
 export const insertInvestmentEntrySchema = createInsertSchema(investmentEntries).omit({ id: true });
+export const insertInvestmentEntryPurchaseSchema = createInsertSchema(investmentEntryPurchases).omit({ id: true, createdAt: true });
+export const insertAccountTransactionPurchaseSchema = createInsertSchema(accountTransactionPurchases).omit({ id: true, createdAt: true });
 
 // === TYPES ===
 export type Customer = typeof customers.$inferSelect;
@@ -365,8 +427,11 @@ export type StockAdjustment = typeof stockAdjustments.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
 export type Staff = typeof staff.$inferSelect;
 export type StaffAttendance = typeof staffAttendance.$inferSelect;
+export type StaffSalaryPayment = typeof staffSalaryPayments.$inferSelect;
 export type AccountTransaction = typeof accountTransactions.$inferSelect;
 export type InvestmentEntry = typeof investmentEntries.$inferSelect;
+export type InvestmentEntryPurchase = typeof investmentEntryPurchases.$inferSelect;
+export type AccountTransactionPurchase = typeof accountTransactionPurchases.$inferSelect;
 
 export type CreateBillRequest = {
   customerId?: number; // Optional for walk-in

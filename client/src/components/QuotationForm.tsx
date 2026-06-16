@@ -1,7 +1,6 @@
 
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "wouter";
-import { ArrowLeft, CalendarIcon, Plus, Save, Search, ShoppingBag, Trash2 } from "lucide-react";
+import { CalendarIcon, ClipboardPaste, Plus, Save, Search, ShoppingBag, Trash2 } from "lucide-react";
 import { useCustomers, useProducts } from "@/hooks/use-pos";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -13,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { formatCurrencyINR, formatDate, formatDateTime, toISTDateTimeStringForApi } from "@/lib/format";
-import { deriveUnitPriceFromBase, getBaseUnit, getDefaultSalesUnit, getPrimaryUnit, hasSecondaryUnit, normalizeUnitPriceToBase, toBaseQuantity, UNIT_OPTIONS, type UnitOption } from "@shared/units";
+import { deriveUnitPriceFromBase, getAvailableUnits, getBaseUnit, getDefaultSalesUnit, getPrimaryUnit, hasSecondaryUnit, normalizeUnitPriceToBase, toBaseQuantity, UNIT_OPTIONS, type UnitOption } from "@shared/units";
 import type { CreateQuotationInput } from "@shared/routes";
 import type { Bill, Customer, Quotation, QuotationCharge, QuotationItem } from "@shared/schema";
 
@@ -21,6 +20,8 @@ type QuoteDetails = Quotation & { items: QuotationItem[]; charges: QuotationChar
 type CartItem = { tempId: string; productId?: number; name: string; price: number; basePrice: number; costPrice: number; baseCostPrice: number; quantity: number; unit: UnitOption; primaryUnit: UnitOption; secondaryUnit?: UnitOption | null; unitConversion?: number | null };
 type ChargeRow = { id: string; label: string; amount: string };
 type PendingProduct = { productId: number; name: string; price: string; baseCostPrice: number; unit: UnitOption; primaryUnit: UnitOption; secondaryUnit?: UnitOption | null; unitConversion?: number | null };
+const DEFAULT_CUSTOM_UNIT: UnitOption = "KG";
+const BULK_PRICE_AT_END_PATTERN = /^(.*?)[\s\t,|:-]+(?:rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*$/i;
 
 type Props = {
   mode: "create" | "edit";
@@ -51,6 +52,21 @@ function inferUnits(item: { unit?: string | null; baseUnit?: string | null; quan
   };
 }
 
+function parseBulkItemLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const normalizedHeader = trimmed.toLowerCase().replace(/\s+/g, " ");
+  if (normalizedHeader === "item sell price" || normalizedHeader === "item selling price") return null;
+
+  const match = trimmed.match(BULK_PRICE_AT_END_PATTERN);
+  if (!match) return { name: trimmed, price: 0 };
+
+  const name = match[1].trim();
+  const price = Number(match[2].replace(/,/g, ""));
+  if (!name || !Number.isFinite(price)) return { name: trimmed, price: 0 };
+  return { name, price };
+}
+
 export default function QuotationForm({ mode, quotation, loading = false, saving = false, onSubmit }: Props) {
   const { data: products, isLoading: productsLoading } = useProducts();
   const { data: customers, isLoading: customersLoading } = useCustomers();
@@ -62,7 +78,9 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
   const [extraCharges, setExtraCharges] = useState<ChargeRow[]>([]);
   const [pendingProduct, setPendingProduct] = useState<PendingProduct | null>(null);
   const [isCustomItemOpen, setIsCustomItemOpen] = useState(false);
-  const [customItem, setCustomItem] = useState({ name: "", price: "", quantity: "1", unit: "PCS" as UnitOption });
+  const [isBulkItemOpen, setIsBulkItemOpen] = useState(false);
+  const [customItem, setCustomItem] = useState({ name: "", price: "", quantity: "1", unit: DEFAULT_CUSTOM_UNIT });
+  const [bulkItems, setBulkItems] = useState("");
   const [quoteDate, setQuoteDate] = useState<Date | undefined>(new Date());
   const [notes, setNotes] = useState("");
   const [editedBy, setEditedBy] = useState("");
@@ -168,22 +186,48 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
       secondaryUnit: null,
       unitConversion: null,
     }]);
-    setCustomItem({ name: "", price: "", quantity: "1", unit: "PCS" });
+    setCustomItem({ name: "", price: "", quantity: "1", unit: DEFAULT_CUSTOM_UNIT });
     setIsCustomItemOpen(false);
   };
 
+  const addBulkItems = () => {
+    const parsedItems = bulkItems
+      .split(/\r?\n/)
+      .map(parseBulkItemLine)
+      .filter((item): item is { name: string; price: number } => Boolean(item));
+    if (parsedItems.length === 0) return;
+    setCart((prev) => [
+      ...prev,
+      ...parsedItems.map((item) => ({
+        tempId: crypto.randomUUID(),
+        name: item.name,
+        price: item.price,
+        basePrice: item.price,
+        costPrice: 0,
+        baseCostPrice: 0,
+        quantity: 0,
+        unit: DEFAULT_CUSTOM_UNIT,
+        primaryUnit: DEFAULT_CUSTOM_UNIT,
+        secondaryUnit: null,
+        unitConversion: null,
+      })),
+    ]);
+    setBulkItems("");
+    setIsBulkItemOpen(false);
+  };
+
   const submit = () => {
-    if (cart.length === 0) {
-      toast({ title: "Quotation is empty", description: "Add at least one item before saving.", variant: "destructive" });
-      return;
+    const validCartItems = cart.filter((item) => item.name.trim());
+    if (validCartItems.length !== cart.length) {
+      setCart(validCartItems);
     }
-    if (cart.some((item) => !item.name.trim())) {
-      toast({ title: "Missing item name", description: "Custom items need a name.", variant: "destructive" });
+    if (validCartItems.length === 0) {
+      toast({ title: "Quotation is empty", description: "Add at least one item before saving.", variant: "destructive" });
       return;
     }
     onSubmit({
       customerId: selectedCustomer || undefined,
-      items: cart.map((item) => ({
+      items: validCartItems.map((item) => ({
         productId: item.productId,
         name: item.name.trim(),
         quantity: item.quantity,
@@ -212,13 +256,22 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
     <div className="h-[calc(100vh-64px)] md:h-screen flex flex-col md:flex-row overflow-hidden bg-background">
       <div className="flex-1 flex flex-col h-full border-r border-border">
         <div className="p-4 border-b border-border bg-card space-y-3">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <Link href={mode === "create" ? "/quotations" : `/quotations/${quotation?.id}`} className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft className="w-4 h-4" />{mode === "create" ? "Back to Quotations" : "Back to Quotation Details"}</Link>
-              <h2 className="font-display font-bold text-xl mt-2">{mode === "create" ? "Create Quotation" : `Edit Quotation #${quotation?.id}`}</h2>
+          {quotation && mode === "edit" && (
+            <div className="flex flex-col gap-1 text-sm text-muted-foreground md:flex-row md:items-center md:justify-between">
+              <div className="font-medium text-foreground">{`Edit Quotation #${quotation.id}`}</div>
+              <div className="text-left md:text-right">
+                <div>
+                  Status: <span className="font-medium text-foreground capitalize">{quotation.status}</span>
+                </div>
+                {quotation.lastEditedAt && (
+                  <div className="mt-1">
+                    Last edited on {formatDateTime(quotation.lastEditedAt, "dd MMM yyyy, hh:mm a")}
+                    {quotation.lastEditedBy ? ` by ${quotation.lastEditedBy}` : ""}
+                  </div>
+                )}
+              </div>
             </div>
-            {quotation && <div className="text-right text-sm text-muted-foreground"><div>Status: <span className="font-medium text-foreground capitalize">{quotation.status}</span></div>{quotation.lastEditedAt && <div className="mt-1">Last edited on {formatDateTime(quotation.lastEditedAt, "dd MMM yyyy, hh:mm a")}{quotation.lastEditedBy ? ` by ${quotation.lastEditedBy}` : ""}</div>}</div>}
-          </div>
+          )}
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
             <select className="h-10 rounded-lg border border-input bg-background px-3 py-2 text-sm" value={selectedCustomer || ""} onChange={(e) => setSelectedCustomer(e.target.value ? Number(e.target.value) : null)} disabled={isConverted}>
               <option value="">Walk-in Customer</option>
@@ -242,7 +295,7 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
                 {item.productId ? <h4 className="font-medium line-clamp-1">{item.name}</h4> : <Input value={item.name} onChange={(e) => updateItem(item.tempId, { name: e.target.value })} className="h-9" placeholder="Custom item name" disabled={isConverted} />}
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                   <span>Selling Price</span>
-                  <Input type="number" min="0" step="0.01" value={item.price} onChange={(e) => updateItem(item.tempId, { price: Math.max(0, Number(e.target.value) || 0), basePrice: normalizeUnitPriceToBase(Math.max(0, Number(e.target.value) || 0), { primaryUnit: item.primaryUnit, secondaryUnit: item.secondaryUnit, unitConversion: item.unitConversion }, item.unit) })} className="h-8 w-28 font-mono" onFocus={(e) => e.target.select()} disabled={isConverted} />
+                  <Input type="number" min="0" step="1" value={item.price} onChange={(e) => updateItem(item.tempId, { price: Math.max(0, Number(e.target.value) || 0), basePrice: normalizeUnitPriceToBase(Math.max(0, Number(e.target.value) || 0), { primaryUnit: item.primaryUnit, secondaryUnit: item.secondaryUnit, unitConversion: item.unitConversion }, item.unit) })} className="h-8 w-28 font-mono" onFocus={(e) => e.target.select()} disabled={isConverted} />
                   <span>/ {item.unit}</span>
                 </div>
               </div>
@@ -250,12 +303,12 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
                 <div className="font-bold font-mono">{formatCurrencyINR(item.price * item.quantity)}</div>
                 <div className="flex items-center gap-2">
                   <div className="flex items-center border border-border rounded-lg bg-background">
-                    <button type="button" onClick={() => updateItem(item.tempId, { quantity: Math.max(1, item.quantity - 1) })} className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium" disabled={isConverted}>-</button>
-                    <Input type="number" min="1" value={item.quantity} onChange={(e) => updateItem(item.tempId, { quantity: Math.max(1, Number(e.target.value) || 1) })} className="w-12 h-8 text-center text-sm font-medium border-0 focus-visible:ring-0 p-0" onFocus={(e) => e.target.select()} disabled={isConverted} />
+                    <button type="button" onClick={() => updateItem(item.tempId, { quantity: Math.max(0, item.quantity - 1) })} className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium" disabled={isConverted}>-</button>
+                    <Input type="number" min="0" value={item.quantity} onChange={(e) => updateItem(item.tempId, { quantity: Math.max(0, Number(e.target.value) || 0) })} className="w-12 h-8 text-center text-sm font-medium border-0 focus-visible:ring-0 p-0" onFocus={(e) => e.target.select()} disabled={isConverted} />
                     <button type="button" onClick={() => updateItem(item.tempId, { quantity: item.quantity + 1 })} className="w-8 h-8 flex items-center justify-center hover:bg-muted text-lg font-medium" disabled={isConverted}>+</button>
                   </div>
                   <select className="h-8 rounded-lg border border-input bg-background px-2 text-sm" value={item.unit} onChange={(e) => updateItem(item.tempId, { unit: e.target.value as UnitOption, price: deriveUnitPriceFromBase(item.basePrice, { primaryUnit: item.primaryUnit, secondaryUnit: item.secondaryUnit, unitConversion: item.unitConversion }, e.target.value), costPrice: deriveUnitPriceFromBase(item.baseCostPrice, { primaryUnit: item.primaryUnit, secondaryUnit: item.secondaryUnit, unitConversion: item.unitConversion }, e.target.value) })} disabled={isConverted}>
-                      {Array.from(new Set([item.primaryUnit, ...(item.secondaryUnit ? [item.secondaryUnit] : [])])).map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                      {getAvailableUnits({ primaryUnit: item.primaryUnit, secondaryUnit: item.secondaryUnit, unitConversion: item.unitConversion }).map((unit) => <option key={unit} value={unit}>{unit}</option>)}
                   </select>
                 </div>
                 <button type="button" onClick={() => removeItem(item.tempId)} className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors" disabled={isConverted}><Trash2 className="w-4 h-4" /></button>
@@ -269,7 +322,7 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
             {extraCharges.map((charge) => (
               <div key={charge.id} className="grid grid-cols-[1fr_120px_auto] gap-2 items-center">
                 <Input placeholder="Charge name" value={charge.label} onChange={(e) => setExtraCharges((prev) => prev.map((row) => row.id === charge.id ? { ...row, label: e.target.value } : row))} className="h-9" disabled={isConverted} />
-                <Input type="number" min="0" step="0.01" placeholder="0.00" value={charge.amount} onChange={(e) => setExtraCharges((prev) => prev.map((row) => row.id === charge.id ? { ...row, amount: e.target.value } : row))} className="h-9 font-mono" onFocus={(e) => e.target.select()} disabled={isConverted} />
+                <Input type="number" min="0" step="1" placeholder="0.00" value={charge.amount} onChange={(e) => setExtraCharges((prev) => prev.map((row) => row.id === charge.id ? { ...row, amount: e.target.value } : row))} className="h-9 font-mono" onFocus={(e) => e.target.select()} disabled={isConverted} />
                 <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => setExtraCharges((prev) => prev.filter((row) => row.id !== charge.id))} disabled={isConverted}><Trash2 className="w-4 h-4" /></Button>
               </div>
             ))}
@@ -280,7 +333,7 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
               <div className="flex justify-between border-t border-border pt-2"><span className="font-medium">Total</span><span className="font-bold font-mono text-base">{formatCurrencyINR(total)}</span></div>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <Dialog open={isCustomItemOpen} onOpenChange={setIsCustomItemOpen}>
               <DialogTrigger asChild><Button variant="outline" className="h-12 text-base" disabled={isConverted}><Plus className="w-4 h-4 mr-2" /> Custom Item</Button></DialogTrigger>
               <DialogContent>
@@ -295,6 +348,24 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
                     <Input type="number" placeholder="Qty" value={customItem.quantity} onChange={(e) => setCustomItem({ ...customItem, quantity: e.target.value })} />
                   </div>
                   <DialogFooter><Button type="submit">Add to Quotation</Button></DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+            <Dialog open={isBulkItemOpen} onOpenChange={setIsBulkItemOpen}>
+              <DialogTrigger asChild><Button variant="outline" className="h-12 text-base" disabled={isConverted}><ClipboardPaste className="w-4 h-4 mr-2" /> Bulk Items</Button></DialogTrigger>
+              <DialogContent>
+                <form onSubmit={(e) => { e.preventDefault(); addBulkItems(); }}>
+                  <DialogHeader><DialogTitle>Add Bulk Items</DialogTitle></DialogHeader>
+                  <div className="grid gap-4 py-4">
+                    <Textarea
+                      placeholder="Paste one item and selling price per line, like: LG 80"
+                      value={bulkItems}
+                      onChange={(e) => setBulkItems(e.target.value)}
+                      rows={10}
+                      autoFocus
+                    />
+                  </div>
+                  <DialogFooter><Button type="submit" disabled={!bulkItems.trim()}>Add to Quotation</Button></DialogFooter>
                 </form>
               </DialogContent>
             </Dialog>
@@ -322,7 +393,7 @@ export default function QuotationForm({ mode, quotation, loading = false, saving
         <DialogContent className="sm:max-w-md">
           <form onSubmit={(e) => { e.preventDefault(); addPendingProduct(); }}>
             <DialogHeader><DialogTitle>Confirm Selling Price</DialogTitle></DialogHeader>
-            {pendingProduct && <div className="grid gap-4 py-4"><div className="rounded-xl border border-border bg-muted/30 p-4"><div className="text-sm font-medium">{pendingProduct.name}</div><div className="mt-1 text-xs text-muted-foreground">This price change applies only to this quotation.</div></div><div className="space-y-2"><label className="text-sm font-medium">Selling Price / {pendingProduct.unit}</label><Input type="number" min="0" step="0.01" value={pendingProduct.price} onChange={(e) => setPendingProduct((current) => current ? { ...current, price: e.target.value } : current)} onFocus={(e) => e.target.select()} className="h-12 text-lg font-mono" autoFocus /></div></div>}
+            {pendingProduct && <div className="grid gap-4 py-4"><div className="rounded-xl border border-border bg-muted/30 p-4"><div className="text-sm font-medium">{pendingProduct.name}</div><div className="mt-1 text-xs text-muted-foreground">This price change applies only to this quotation.</div></div><div className="space-y-2"><label className="text-sm font-medium">Selling Price / {pendingProduct.unit}</label><Input type="number" min="0" step="1" value={pendingProduct.price} onChange={(e) => setPendingProduct((current) => current ? { ...current, price: e.target.value } : current)} onFocus={(e) => e.target.select()} className="h-12 text-lg font-mono" autoFocus /></div></div>}
             <DialogFooter className="gap-2 sm:gap-0"><Button type="button" variant="outline" onClick={() => setPendingProduct(null)}>Cancel</Button><Button type="submit">Add to Quotation</Button></DialogFooter>
           </form>
         </DialogContent>

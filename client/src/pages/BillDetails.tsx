@@ -5,8 +5,9 @@ import { Link, useLocation } from "wouter";
 import { ArrowLeft, Download, Pencil, Printer, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatCurrencyINR, formatDate, formatDateTime } from "@/lib/format";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useToast } from "@/hooks/use-toast";
+import { formatBillLabel, getBillDisplayNumber } from "@shared/billing";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,9 +40,19 @@ function estimatePdfTextWidth(text: string, size: number, font = "F1") {
   return text.length * size * factor;
 }
 
+const paymentDetails = [
+  "PhonePe / GPay: 9655119930",
+  "Name: Attuluri Thirupathi Rao",
+  "Acc No: 7550475494",
+  "IFSC: KKBK0007860",
+];
+
 export default function BillDetails() {
   const [, params] = useRoute("/bills/:id");
   const id = Number(params?.id);
+  const searchParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const backHref = searchParams?.get("back") || "/bills";
+  const backQuery = `back=${encodeURIComponent(backHref)}`;
   const { data: bill, isLoading } = useBill(id);
   const { mutate: deleteBill, isPending: isDeleting } = useDeleteBill();
   const { toast } = useToast();
@@ -70,6 +81,11 @@ export default function BillDetails() {
         { label: "Pending Balance", amount: remainingPendingBalance, emphasis: true },
       ]
     : [];
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [id]);
 
   const handleDownload = () => {
     if (!bill) return;
@@ -223,7 +239,7 @@ export default function BillDetails() {
         setRGB(ops, muted);
         drawRightText(ops, "INVOICE", right, 727, "F1", 8);
         setRGB(ops, gold);
-        drawRightText(ops, `#${bill.id}`, right, 713, "F2", 13);
+        drawRightText(ops, formatBillLabel(bill), right, 713, "F2", 13);
         setRGB(ops, mid);
         const dateStr = bill.date ? formatDate(bill.date, "dd/MM/yyyy") : "-";
         drawRightText(ops, dateStr, right, 699, "F1", 10);
@@ -237,7 +253,7 @@ export default function BillDetails() {
       setRGB(ops, dark);
       drawCenteredText(ops, "SRI LAKSHMI TRADERS", centerX, 800, "F2", 14);
       setRGB(ops, muted);
-      drawRightText(ops, `#${bill.id}`, right, 782, "F1", 10);
+      drawRightText(ops, formatBillLabel(bill), right, 782, "F1", 10);
       drawRightText(ops, bill.date ? formatDate(bill.date, "dd/MM/yyyy") : "-", right, 770, "F1", 10);
       drawOrnament(ops, 758);
       setRGB(ops, dark);
@@ -327,8 +343,12 @@ export default function BillDetails() {
     drawLine(cur, left, y + 10, right, y + 10, 0.5);
     setStrokeRGB(cur, "0 0 0");
 
+    setRGB(cur, gold);
+    drawText(cur, "PAYMENT DETAILS", left, y - 4, "F2", 8);
     setRGB(cur, muted);
-    drawText(cur, "Goods once sold will not be taken back.", left, y - 4, "F1", 9);
+    paymentDetails.forEach((detail, index) => {
+      drawText(cur, detail, left, y - 17 - index * 12, "F1", 8);
+    });
     setRGB(cur, gold);
     drawRightText(cur, "Thank you for your business!", amtRight, y - 4, "F2", 10);
 
@@ -384,7 +404,7 @@ export default function BillDetails() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;
-    a.download = `bill-${bill.id}.pdf`;
+    a.download = `bill-${getBillDisplayNumber(bill) ?? bill.id}.pdf`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -587,15 +607,15 @@ export default function BillDetails() {
         {/* Top nav */}
         <div className="flex justify-between items-center print:hidden">
           <Link
-            href="/bills"
+            href={backHref}
             className="inline-flex items-center gap-1.5 text-sm font-medium text-stone-500 hover:text-stone-800 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
-            Back to Bills
+            {backHref.startsWith("/customers/") ? "Back to Customer" : "Back to Bills"}
           </Link>
           <div className="flex items-center gap-2">
             {bill.status === "completed" && (
-              <Link href={`/bills/${bill.id}/edit`}>
+              <Link href={`/bills/${bill.id}/edit?${backQuery}`}>
                 <Button variant="outline" className="bill-action-btn h-9 px-4 rounded-lg border-stone-300">
                   <Pencil className="w-3.5 h-3.5 mr-2" />
                   Edit
@@ -690,7 +710,7 @@ export default function BillDetails() {
                   <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#b8a070" }}>
                     Invoice
                   </span>
-                  <div className="bill-badge mt-1">#{bill.id}</div>
+                  <div className="bill-badge mt-1">{formatBillLabel(bill)}</div>
                 </div>
                 <p className="text-sm mt-2" style={{ color: "#7a6040" }}>
                   <span className="text-xs uppercase tracking-wider font-semibold" style={{ color: "#b8a070" }}>Date </span>
@@ -774,11 +794,15 @@ export default function BillDetails() {
               <div className="flex justify-between items-end">
                 <div>
                   <p className="text-xs uppercase tracking-widest font-semibold mb-1" style={{ color: "#b8a070" }}>
-                    Terms
+                    Payment Details
                   </p>
-                  <p className="text-xs" style={{ color: "#9a8060" }}>
-                    Goods once sold will not be taken back.
-                  </p>
+                  <div className="space-y-0.5">
+                    {paymentDetails.map((detail) => (
+                      <p key={detail} className="text-xs" style={{ color: "#9a8060" }}>
+                        {detail}
+                      </p>
+                    ))}
+                  </div>
                 </div>
                 <div className="text-right">
                   <p
@@ -800,7 +824,7 @@ export default function BillDetails() {
       <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete bill #{bill.id}?</AlertDialogTitle>
+            <AlertDialogTitle>Delete bill {formatBillLabel(bill)}?</AlertDialogTitle>
             <AlertDialogDescription>
               This will remove the bill effects and restore customer balance, stock, sales, and profit to the previous values.
             </AlertDialogDescription>
@@ -813,10 +837,10 @@ export default function BillDetails() {
                   onSuccess: () => {
                     toast({
                       title: "Bill deleted",
-                      description: `Bill #${bill.id} was reversed successfully.`,
+                      description: `${formatBillLabel(bill)} was reversed successfully.`,
                     });
                     setConfirmDeleteOpen(false);
-                    setLocation("/bills");
+                    setLocation(backHref);
                   },
                   onError: (error: Error) => {
                     toast({
